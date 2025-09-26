@@ -1,0 +1,161 @@
+# Команды и результаты: Практические навыки работы с ZFS.
+
+
+root@test02:~# lsblk
+NAME                      MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
+fd0                         2:0    1    4K  0 disk 
+sda                         8:0    0   25G  0 disk 
+├─sda1                      8:1    0    1M  0 part 
+├─sda2                      8:2    0    2G  0 part /boot
+└─sda3                      8:3    0   23G  0 part 
+  └─ubuntu--vg-ubuntu--lv 252:0    0 11.5G  0 lvm  /
+sdb                         8:16   0    1G  0 disk 
+sdc                         8:32   0    1G  0 disk 
+sdd                         8:48   0    1G  0 disk 
+sde                         8:64   0    1G  0 disk 
+sdf                         8:80   0    1G  0 disk 
+sdg                         8:96   0    1G  0 disk 
+sdh                         8:112  0    1G  0 disk 
+sdi                         8:128  0    1G  0 disk 
+sr0                        11:0    1 1024M  0 rom  
+
+
+root@test02:~# apt update
+... (обновление репозиториев) ...
+Fetched 11.8 MB in 24s (490 kB/s)
+Reading package lists... Done
+
+root@test02:~# apt install -y zfsutils-linux
+... (установка пакетов) ...
+Setting up zfsutils-linux (2.2.2-0ubuntu9.4) ...
+insmod /lib/modules/6.8.0-83-generic/kernel/zfs/spl.ko.zst 
+insmod /lib/modules/6.8.0-83-generic/kernel/zfs/zfs.ko.zst 
+Created symlink /etc/systemd/system/zfs-import.target.wants/zfs-import-cache.service → /usr/lib/systemd/system/zfs-import-cache.service.
+...
+
+root@test02:~# zfs --version
+zfs-2.2.2-0ubuntu9.4
+zfs-kmod-2.2.2-0ubuntu9.3
+
+
+root@test02:~# zpool create otus1 mirror /dev/sdb /dev/sdc
+root@test02:~# zpool create otus2 mirror /dev/sdd /dev/sde
+root@test02:~# zpool create otus3 mirror /dev/sdf /dev/sdg
+root@test02:~# zpool create otus4 mirror /dev/sdh /dev/sdi
+
+root@test02:~# zpool list
+NAME    SIZE  ALLOC   FREE  CKPOINT  EXPANDSZ   FRAG    CAP  DEDUP    HEALTH  ALTROOT
+otus1   960M   384K   960M        -         -     0%     0%  1.00x    ONLINE  -
+otus2   960M   336K   960M        -         -     0%     0%  1.00x    ONLINE  -
+otus3   960M   384K   960M        -         -     0%     0%  1.00x    ONLINE  -
+otus4   960M   384K   960M        -         -     0%     0%  1.00x    ONLINE  -
+
+
+
+root@test02:~# zfs set compression=lzjb otus1
+root@test02:~# zfs set compression=lz4 otus2
+root@test02:~# zfs set compression=gzip-9 otus3
+root@test02:~# zfs set compression=zle otus4
+
+root@test02:~# zfs get compression otus1 otus2 otus3 otus4
+NAME   PROPERTY     VALUE           SOURCE
+otus1  compression  lzjb            local
+otus2  compression  lz4             local
+otus3  compression  gzip-9          local
+otus4  compression  zle             local
+
+
+root@test02:~# for pool in otus1 otus2 otus3 otus4; do
+    wget -O /$pool/pg2600.converter.log https://gutenberg.org/cache/epub/2600/pg2600.converter.log
+done
+... (скачивание в каждый пул) ...
+
+root@test02:~# ls -l /otus*/pg2600.converter.log
+-rw-r--r-- 1 root root 41174169 Sep  2 07:31 /otus1/pg2600.converter.log
+-rw-r--r-- 1 root root 41174169 Sep  2 07:31 /otus2/pg2600.converter.log
+-rw-r--r-- 1 root root 41174169 Sep  2 07:31 /otus3/pg2600.converter.log
+-rw-r--r-- 1 root root 41174169 Sep  2 07:31 /otus4/pg2600.converter.log
+
+root@test02:~# zfs list -o name,used,avail,refer,compressratio otus1 otus2 otus3 otus4
+NAME    USED  AVAIL  REFER  RATIO
+otus1  22.5M   809M  22.1M  1.78x
+otus2  18.5M   813M  18.2M  2.17x
+otus3  11.7M   820M  11.3M  3.48x
+otus4  39.8M   792M  39.4M  1.00x
+
+Вывод: Наилучший алгоритм сжатия — gzip-9 (3.48x)
+
+
+root@test02:~# wget -O archive.tar.gz --no-check-certificate 'https://drive.usercontent.google.com/download?id=1MvrcEp-WgAQe57aDEzxSRalPAwbNN1Bb&export=download'
+... (скачивание) ...
+
+root@test02:~# mkdir -p /root/zpoolexport
+root@test02:~# tar -xzvf archive.tar.gz -C /root/zpoolexport/
+zpoolexport/
+zpoolexport/filea
+zpoolexport/fileb
+
+root@test02:~# ls -l /root/zpoolexport/
+total 4
+drwxr-xr-x 2 root root 4096 May 15  2020 zpoolexport
+
+root@test02:~# ls -l /root/zpoolexport/zpoolexport/
+total 1024008
+-rw-r--r-- 1 root root 524288000 Sep 26 13:59 filea
+-rw-r--r-- 1 root root 524288000 Sep 26 13:59 fileb
+
+root@test02:~# zpool import -d /root/zpoolexport/zpoolexport/ otus
+
+root@test02:~# zpool status otus
+  pool: otus
+ state: ONLINE
+status: Some supported and requested features are not enabled on the pool.
+	action: Enable all features using 'zpool upgrade'.
+config:
+	NAME                                     STATE     READ WRITE CKSUM
+	otus                                     ONLINE       0     0     0
+	  mirror-0                               ONLINE       0     0     0
+	    /root/zpoolexport/zpoolexport/filea  ONLINE       0     0     0
+	    /root/zpoolexport/zpoolexport/fileb  ONLINE       0     0     0
+errors: No known data errors
+
+
+root@test02:~# zfs get available otus
+NAME  PROPERTY   VALUE  SOURCE
+otus  available  350M   -
+
+root@test02:~# zfs get readonly otus
+NAME  PROPERTY  VALUE   SOURCE
+otus  readonly  off     default
+
+root@test02:~# zfs get recordsize otus
+NAME  PROPERTY    VALUE    SOURCE
+otus  recordsize  128K     local
+
+root@test02:~# zfs get compression otus
+NAME  PROPERTY     VALUE           SOURCE
+otus  compression  zle             local
+
+root@test02:~# zfs get checksum otus
+NAME  PROPERTY  VALUE      SOURCE
+otus  checksum  sha256     local
+
+
+root@test02:~# wget -O otus_task2.file --no-check-certificate 'https://drive.usercontent.google.com/download?id=1wgxjih8YZ-cqLqaZVa0lA3h3Y029c3oI&export=download'
+... (скачивание) ...
+
+root@test02:~# zfs create otus/test
+
+root@test02:~# zfs receive -F otus/test@today < otus_task2.file
+cannot receive new filesystem stream: destination has snapshots (eg. otus/test@today)
+must destroy them to overwrite it
+
+root@test02:~# zfs destroy otus/test@today
+root@test02:~# zfs receive -F otus/test@today < otus_task2.file
+Received otus/test@today stream (1124480 bytes) in 0.1 seconds
+
+root@test02:~# find /otus/test -name "secret_message" -type f
+/otus/test/task1/file_mess/secret_message
+
+root@test02:~# cat /otus/test/task1/file_mess/secret_message
+https://otus.ru/lessons/linux-hl/
