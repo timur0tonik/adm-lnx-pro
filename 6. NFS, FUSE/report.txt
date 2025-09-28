@@ -1,0 +1,107 @@
+# Команды и результаты: Работа с NFS.
+
+===================================
+NFS - Server (test01: 172.18.61.29)
+===================================
+
+root@test01:~# apt update
+Hit:1 http://ru.archive.ubuntu.com/ubuntu noble InRelease
+Get:2 http://ru.archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Get:3 http://ru.archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+Get:4 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+Fetched 3953 kB in 1s (2865 kB/s)
+Reading package lists... Done
+
+root@test01:~# apt install -y nfs-kernel-server
+The following NEW packages will be installed:
+  keyutils libnfsidmap1 nfs-common nfs-kernel-server rpcbind
+0 upgraded, 5 newly installed, 0 to remove and 13 not upgraded.
+... (установка прошла успешно)
+
+root@test01:~# mkdir -p /srv/share/upload
+
+root@test01:~# chown -R nobody:nogroup /srv/share
+root@test01:~# chmod 0777 /srv/share/upload
+
+root@test01:~# nano /etc/exports
+/srv/share 172.18.59.149(rw,sync,no_root_squash,no_subtree_check)
+
+root@test01:~# exportfs -ra
+
+root@test01:~# systemctl restart nfs-kernel-server
+
+root@test01:~# exportfs -s
+/srv/share  172.18.59.149(sync,wdelay,hide,no_subtree_check,sec=sys,rw,secure,no_root_squash,no_all_squash)
+
+root@test01:~# ss -tnplu | grep -E "(nfs|rpc)"
+udp   UNCONN 0      0                0.0.0.0:56851      0.0.0.0:*    users:(("rpc.mountd",pid=2825,fd=8))
+udp   UNCONN 0      0                0.0.0.0:47838      0.0.0.0:*    users:(("rpc.mountd",pid=2825,fd=4))
+udp   UNCONN 0      0              127.0.0.1:952        0.0.0.0:*    users:(("rpc.statd",pid=2472,fd=5))
+udp   UNCONN 0      0                0.0.0.0:33731      0.0.0.0:*    users:(("rpc.statd",pid=2472,fd=8))
+udp   UNCONN 0      0                0.0.0.0:111        0.0.0.0:*    users:(("rpcbind",pid=1917,fd=5),("systemd",pid=1,fd=239))
+udp   UNCONN 0      0                0.0.0.0:52452      0.0.0.0:*    users:(("rpc.mountd",pid=2825,fd=12))
+udp   UNCONN 0      0                   [::]:53708         [::]:*    users:(("rpc.mountd",pid=2825,fd=10))
+udp   UNCONN 0      0                   [::]:42046         [::]:*    users:(("rpc.mountd",pid=2825,fd=14))
+udp   UNCONN 0      0                   [::]:50263         [::]:*    users:(("rpc.mountd",pid=2825,fd=6))
+udp   UNCONN 0      0                   [::]:111           [::]:*    users:(("rpcbind",pid=1917,fd=7),("systemd",pid=1,fd=241))
+udp   UNCONN 0      0                   [::]:41390         [::]:*    users:(("rpc.statd",pid=2472,fd=10))
+tcp   LISTEN 0      4096             0.0.0.0:51585      0.0.0.0:*    users:(("rpc.mountd",pid=2825,fd=13))
+tcp   LISTEN 0      4096             0.0.0.0:53629      0.0.0.0:*    users:(("rpc.mountd",pid=2825,fd=5))
+tcp   LISTEN 0      4096             0.0.0.0:111        0.0.0.0:*    users:(("rpcbind",pid=1917,fd=4),("systemd",pid=1,fd=238))
+tcp   LISTEN 0      4096             0.0.0.0:43685      0.0.0.0:*    users:(("rpc.statd",pid=2472,fd=9))
+tcp   LISTEN 0      4096             0.0.0.0:46601      0.0.0.0:*    users:(("rpc.mountd",pid=2825,fd=9))
+tcp   LISTEN 0      4096                [::]:53519         [::]:*    users:(("rpc.mountd",pid=2825,fd=11))
+tcp   LISTEN 0      4096                [::]:58607         [::]:*    users:(("rpc.mountd",pid=2825,fd=7))
+tcp   LISTEN 0      4096                [::]:111           [::]:*    users:(("rpcbind",pid=1917,fd=6),("systemd",pid=1,fd=240))
+tcp   LISTEN 0      4096                [::]:46045         [::]:*    users:(("rpc.statd",pid=2472,fd=11))
+tcp   LISTEN 0      4096                [::]:43819         [::]:*    users:(("rpc.mountd",pid=2825,fd=15))
+
+root@test01:~# rpcinfo -p | grep nfs
+    100003    3   tcp   2049   nfs
+    100003    4   tcp   2049   nfs
+    100227    3   tcp   2049   nfs_acl
+
+root@test01:~# touch /srv/share/upload/server_test.txt
+
+root@test01:~# ls /srv/share/upload/
+server_test.txt
+
+====================================
+NFS - Client (test03: 172.18.59.149)
+====================================
+
+root@test03:~# apt update
+Hit:1 http://ru.archive.ubuntu.com/ubuntu noble InRelease
+Get:2 http://ru.archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Get:3 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+Fetched 3953 kB in 2s (2466 kB/s)
+Reading package lists... Done
+
+root@test03:~# apt install -y nfs-common
+The following NEW packages will be installed:
+  keyutils libnfsidmap1 nfs-common rpcbind
+0 upgraded, 4 newly installed, 0 to remove and 13 not upgraded.
+... (установка прошла успешно)
+
+root@test03:~# mkdir -p /mnt/upload
+
+root@test03:~# nano /etc/fstab
+172.18.61.29:/srv/share/upload /mnt/upload nfs vers=3,rw,noauto,x-systemd.automount,timeo=10,retrans=2 0 0
+
+root@test03:~# systemctl daemon-reload
+root@test03:~# systemctl restart remote-fs.target
+
+root@test03:~# ls /mnt/upload
+server_test.txt
+
+root@test03:~# mount | grep /mnt/upload
+systemd-1 on /mnt/upload type autofs (rw,relatime,fd=72,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=17538)
+172.18.61.29:/srv/share/upload on /mnt/upload type nfs (rw,relatime,vers=3,rsize=131072,wsize=131072,namlen=255,hard,proto=tcp,timeo=10,retrans=2,sec=sys,mountaddr=172.18.61.29,mountvers=3,mountport=52452,mountproto=udp,local_lock=none,addr=172.18.61.29)
+
+root@test03:~# touch /mnt/upload/client_test.txt
+
+root@test03:~# ls /mnt/upload/
+client_test.txt  server_test.txt
+
+root@test01:~# ls /srv/share/upload/
+client_test.txt  server_test.txt
