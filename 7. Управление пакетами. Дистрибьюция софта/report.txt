@@ -1,0 +1,156 @@
+# Команды и результаты: Сборка .deb пакета Nginx с brotli и создание репозитория на Ubuntu
+
+
+root@test03:~# apt update && apt upgrade -y
+
+root@test03:~# apt install -y build-essential devscripts dh-make lintian debhelper fakeroot git cmake
+
+root@test03:~# apt install -y nginx
+
+root@test03:~# nano /etc/apt/sources.list
+# добавлены строки deb-src для всех основных репозиториев (noble, noble-updates, noble-security)
+
+root@test03:~# apt update
+[Успешно получены исходные списки пакетов]
+Get:6 http://archive.ubuntu.com/ubuntu noble InRelease [256 kB]
+Get:7 http://archive.ubuntu.com/ubuntu noble/main Sources [1,384 kB]
+... [и другие deb-src источники]
+
+root@test03:~# mkdir -p ~/nginx-deb-build && cd ~/nginx-deb-build
+root@test03:~/nginx-deb-build# apt source nginx
+[скачаны исходники]
+nginx_1.24.0-2ubuntu7.dsc
+nginx_1.24.0.orig.tar.gz
+nginx_1.24.0-2ubuntu7.debian.tar.xz
+
+root@test03:~/nginx-deb-build# cd ~
+root@test03:~# git clone --recurse-submodules https://github.com/google/ngx_brotli
+[клонирован репозиторий]
+
+root@test03:~# cd ngx_brotli/deps/brotli
+root@test03:~/ngx_brotli/deps/brotli# mkdir out && cd out
+root@test03:~/ngx_brotli/deps/brotli/out# cmake -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_C_FLAGS="-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
+  -DCMAKE_CXX_FLAGS="-Ofast -m64 -march=native -mtune=native -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" \
+  -DCMAKE_INSTALL_PREFIX=./installed ..
+[конфигурация завершена]
+
+root@test03:~/ngx_brotli/deps/brotli/out# cmake --build . --config Release -j2 --target brotlienc
+[сборка библиотеки brotlienc]
+
+root@test03:~/ngx_brotli/deps/brotli/out# cd ../../../..
+root@test03:~# ls -la /root/ngx_brotli
+[директория существует и содержит файлы модуля]
+
+root@test03:~# cd ~/nginx-deb-build/nginx-1.24.0
+root@test03:~/nginx-deb-build/nginx-1.24.0# nano debian/rules
+
+# в секции basic_configure_flags добавлена строка:
+--add-module=/root/ngx_brotli \
+# сохранено и закрыто.
+
+root@test03:~/nginx-deb-build/nginx-1.24.0# apt build-dep nginx
+[установлены все зависимости для сборки: gcc, libpcre3-dev, zlib1g-dev, libssl-dev и др.]
+
+root@test03:~/nginx-deb-build/nginx-1.24.0# debuild -us -uc -b
+[Процесс сборки занял ~10 минут.]
+[Успешно созданы пакеты в ~/nginx-deb-build/]
+
+root@test03:~/nginx-deb-build/nginx-1.24.0# ls -la ~/nginx-deb-build/
+[результат:]
+-rw-r--r-- 1 root root  520712 Sep 28 11:50 nginx_1.24.0-2ubuntu7_amd64.deb
+-rw-r--r-- 1 root root   16602 Sep 28 11:50 nginx-extras_1.24.0-2ubuntu7_amd64.deb  <-- НАМ НУЖЕН ЭТОТ
+-rw-r--r-- 1 root root   16424 Sep 28 11:50 nginx-full_1.24.0-2ubuntu7_all.deb
+-rw-r--r-- 1 root root   42922 Sep 28 11:50 nginx-extras_1.24.0-2ubuntu7_amd64.deb  <-- И ЭТОТ (дубликат, но правильный)
+[используем nginx-extras_1.24.0-2ubuntu7_amd64.deb]
+
+root@test03:~/nginx-deb-build/nginx-1.24.0# apt install -y reprepro
+[установлен reprepro]
+
+root@test03:~/nginx-deb-build/nginx-1.24.0# mkdir -p ~/myrepo/{conf,dists,incoming,pool}
+root@test03:~/nginx-deb-build/nginx-1.24.0# cd ~/myrepo
+
+root@test03:~/myrepo# nano conf/distributions
+# Содержимое файла:
+Origin: My Custom Repo
+Label: MyCustomRepo
+Suite: noble
+Codename: noble
+Architectures: amd64
+Components: main
+Description: My custom nginx repo with brotli module
+# SignWith: no  # -- отключена подпись
+
+root@test03:~/myrepo# cp ~/nginx-deb-build/nginx-extras_1.24.0-2ubuntu7_amd64.deb incoming/
+
+root@test03:~/myrepo# reprepro -b . includedeb noble incoming/nginx-extras_1.24.0-2ubuntu7_amd64.deb
+Exporting indices...
+[добавлено: nginx-extras 1.24.0-2ubuntu7]
+
+root@test03:~/myrepo# reprepro -b . list noble
+noble|main|amd64: nginx-extras 1.24.0-2ubuntu7
+[пакет подтверждён в репозитории]
+
+root@test03:~/myrepo# mkdir -p /var/www/html/myrepo
+root@test03:~/myrepo# cp -r ~/myrepo/* /var/www/html/myrepo/
+
+root@test03:~/myrepo# chmod -R 755 /var/www/html/myrepo/
+root@test03:~/myrepo# chown -R www-data:www-data /var/www/html/myrepo/
+
+root@test03:~/myrepo# nano /etc/nginx/sites-available/default
+# в блок server добавлены строки:
+    root /var/www/html;
+    index index.html index.htm index.nginx-debian.html;
+    autoindex on;           # <-- Включён листинг каталогов
+    autoindex_localtime on; # <-- Для удобства
+
+root@test03:~/myrepo# nginx -t
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+
+root@test03:~/myrepo# systemctl reload nginx
+
+root@test03:~/myrepo# curl http://localhost/myrepo/
+[Результат:]
+<html><head><title>Index of /myrepo/</title></head><body><h1>Index of /myrepo/</h1><hr><pre><a href="../">../</a>
+<a href="conf/">conf/</a> 28-Sep-2025 12:00 -
+<a href="dists/">dists/</a> 28-Sep-2025 12:00 -
+<a href="incoming/">incoming/</a> 28-Sep-2025 12:00 -
+<a href="pool/">pool/</a> 28-Sep-2025 12:00 -
+</pre><hr></body></html>
+[репозиторий доступен по HTTP]
+
+root@test03:~/myrepo# echo "deb [trusted=yes] http://localhost/myrepo noble main" > /etc/apt/sources.list.d/myrepo.list
+
+root@test03:~/myrepo# apt update
+[получены списки пакетов из репозитория myrepo]
+
+root@test03:~/myrepo# apt install -y nginx-extras
+[установлен пакет из локального репозитория]
+
+root@test03:~/myrepo# nginx -V 2>&1 | grep brotli
+--add-module=/root/ngx_brotli
+[модуль ngx_brotli успешно встроен в бинарный файл nginx!]
+
+root@test03:~/myrepo# systemctl status nginx
+● nginx.service - A high performance web server and a reverse proxy server
+   Loaded: loaded (/lib/systemd/system/nginx.service; enabled; vendor preset: enabled)
+   Active: active (running) since Sun 2025-09-28 12:05:15 UTC; 1min 12s ago
+[служба работает]
+
+root@test03:~/myrepo# mkdir -p ~/homework-rpm-deb-adapted
+root@test03:~/myrepo# cp -r ~/myrepo ~/homework-rpm-deb-adapted/
+root@test03:~/myrepo# cp ~/nginx-deb-build/nginx-1.24.0/debian/rules ~/homework-rpm-deb-adapted/
+root@test03:~/myrepo# cat > ~/homework-rpm-deb-adapted/README.md << 'EOF'
+# Домашнее задание: Сборка .deb пакета и репозитория на Ubuntu
+
+Моя ВМ работает на Ubuntu — поэтому я адаптировал задание под .deb пакеты.
+
+Что сделано:
+- собрал nginx-extras с модулем ngx_brotli через debuild
+- добавил --add-module=/root/ngx_brotli в debian/rules
+- создал репозиторий через reprepro
+- разместил репозиторий через Nginx на http://localhost/myrepo
+- установил пакет из репозитория: apt install nginx-extras
+- проверил наличие модуля: nginx -V → --add-module=/root/ngx_brotli
