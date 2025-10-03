@@ -1,0 +1,73 @@
+# Команды и результаты: Работа с загрузчиком.
+
+# Проверка настроек GRUB и включение меню 
+
+cat /etc/default/grub
+  # If you change this file, run 'update-grub' afterwards to update
+  # /boot/grub/grub.cfg.
+  # For full documentation of the options in this file, see:
+  #   info -f grub -n 'Simple configuration'
+  GRUB_DEFAULT=0
+  GRUB_TIMEOUT_STYLE=hidden
+  GRUB_TIMEOUT=0
+  GRUB_DISTRIBUTOR=`( . /etc/os-release; echo ${NAME:-Ubuntu} ) 2>/dev/null || echo Ubuntu`
+  GRUB_CMDLINE_LINUX_DEFAULT=""
+  GRUB_CMDLINE_LINUX=""
+[остальная часть файла]
+# Видно, что строка 'GRUB_TIMEOUT_STYLE=hidden' активна, а 'GRUB_TIMEOUT=0', что означает скрытие меню и отсутствие задержки.
+
+
+nano /etc/default/grub
+
+# В редакторе были внесены изменения:
+ - Строка 'GRUB_TIMEOUT_STYLE=hidden' была закомментирована: '#GRUB_TIMEOUT_STYLE=hidden'
+ - Значение 'GRUB_TIMEOUT' было изменено с 0 на 10: 'GRUB_TIMEOUT=10'
+
+# Далее шаги включают выполнение 'sudo update-grub' и 'sudo reboot'.
+
+# Приложил скриншоты
+### Способ 1: init=/bin/bash
+- В меню GRUB нажал 'e' на основном пункте загрузки.
+- Добавил `init=/bin/bash` в конец строки `linux`.
+- Нажал `Ctrl+X`.
+- Система загрузилась в bash от root.
+
+### Способ 2: Recovery Mode
+- Выбрал "Advanced options for Ubuntu" в GRUB.
+- Выбрал пункт с `recovery mode`.
+- В меню восстановления активировал `networking`.
+- Выбрал `root` shell.
+- Получил доступ к системе от root.
+
+# Переименовать существующую Volume Group 'ubuntu-vg' на 'tim-vg'.
+
+lsblk
+NAME                      MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
+fd0                         2:0    1    4K  0 disk
+sda                         8:0    0   25G  0 disk
+├─sda1                      8:1    0    1M  0 part
+├─sda2                      8:2    0    2G  0 part /boot
+└─sda3                      8:3    0   23G  0 part
+  └─ubuntu--vg-ubuntu--lv 252:0    0 11.5G  0 lvm  /
+sdb                         8:16   0    5G  0 disk
+sr0                        11:0    1 1024M  0 rom
+
+vgrename ubuntu-vg tim-vg
+
+vgs
+VG     #PV #LV #SN Attr   VSize   VFree 
+tim-vg   1   1   0 wz--n- <23.00g 11.50g
+
+
+sudo reboot
+
+sudo update-initramfs -u -k all
+update-initramfs: Generating /boot/initrd.img-6.8.0-84-generic
+
+vgs
+VG     #PV #LV #SN Attr   VSize   VFree 
+tim-vg   1   1   0 wz--n- <23.00g 11.50g
+
+df -h /
+Filesystem                      Size  Used Avail Use% Mounted on
+/dev/mapper/tim--vg-ubuntu--lv   12G  4.6G  6.1G  44% /
