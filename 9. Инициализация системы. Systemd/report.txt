@@ -1,0 +1,184 @@
+# Команды и результаты: Systemd - создание unit-файла
+
+# 1. Сервис, мониторящий лог каждые 30 секунд
+
+cat > /etc/default/watchlog <<EOF
+# Configuration file for my watchlog service
+WORD="ALERT"
+LOG=/var/log/watchlog.log
+EOF
+
+echo "This is a test log line." > /var/log/watchlog.log
+echo "ALERT: Something critical happened!" >> /var/log/watchlog.log
+
+cat > /opt/watchlog.sh <<'EOF'
+#!/bin/bash
+WORD=$1
+LOG=$2
+DATE=$(date)
+if grep -q "$WORD" "$LOG"; then
+    logger "$DATE: I found word, Master!"
+fi
+EOF
+
+chmod +x /opt/watchlog.sh
+
+cat > /etc/systemd/system/watchlog.service <<EOF
+[Unit]
+Description=My watchlog service
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/watchlog
+ExecStart=/opt/watchlog.sh "$WORD" "$LOG"
+EOF
+
+cat > /etc/systemd/system/watchlog.timer <<EOF
+[Unit]
+Description=Run watchlog script every 30 seconds
+[Timer]
+OnBootSec=10
+OnUnitActiveSec=30
+Unit=watchlog.service
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now watchlog.timer
+
+journalctl -u watchlog.service -f
+Oct 06 14:56:24 test01 systemd[1]: Starting watchlog.service - My watchlog service...
+Oct 06 14:56:24 test01 watchlog.sh[3738]: grep: : No such file or directory
+Oct 06 14:56:24 test01 systemd[1]: watchlog.service: Deactivated successfully.
+Oct 06 14:56:24 test01 systemd[1]: Finished watchlog.service - My watchlog service.
+Oct 06 14:57:11 test01 systemd[1]: Starting watchlog.service - My watchlog service...
+Oct 06 14:57:11 test01 watchlog.sh[4150]: grep: : No such file or directory
+Oct 06 14:57:11 test01 systemd[1]: watchlog.service: Deactivated successfully.
+Oct 06 14:57:11 test01 systemd[1]: Finished watchlog.service - My watchlog service.
+Oct 06 14:57:51 test01 systemd[1]: Starting watchlog.service - My watchlog service...
+Oct 06 14:57:51 test01 watchlog.sh[4155]: grep: : No such file or directory
+Oct 06 14:57:51 test01 systemd[1]: watchlog.service: Deactivated successfully.
+Oct 06 14:57:51 test01 systemd[1]: Finished watchlog.service - My watchlog service.
+
+
+# 2. Установка spawn-fcgi и создание unit-файла
+
+apt install -y spawn-fcgi php-cgi
+
+mkdir -p /etc/spawn-fcgi
+
+cat > /etc/spawn-fcgi/fcgi.conf <<EOF
+SOCKET=/var/run/php-fcgi.sock
+OPTIONS="-u www-data -g www-data -s \$SOCKET -S -M 0600 -C 32 -F 1 -- /usr/bin/php-cgi"
+EOF
+
+cat > /etc/systemd/system/spawn-fcgi.service <<EOF
+[Unit]
+Description=Spawn-fcgi startup service by Otus
+After=network.target
+[Service]
+Type=simple
+PIDFile=/var/run/spawn-fcgi.pid
+EnvironmentFile=/etc/spawn-fcgi/fcgi.conf
+ExecStart=/usr/bin/spawn-fcgi -n \$OPTIONS
+KillMode=process
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl start spawn-fcgi
+systemctl status spawn-fcgi
+● spawn-fcgi.service - Spawn-fcgi startup service by Otus
+     Loaded: loaded (/etc/systemd/system/spawn-fcgi.service; disabled; preset: enabled)
+     Active: active (running) since Mon 2025-10-06 15:19:55 UTC; 6s ago
+   Main PID: 10674 (php-cgi)
+      Tasks: 33 (limit: 2190)
+     Memory: 14.6M (peak: 14.9M)
+        CPU: 29ms
+     CGroup: /system.slice/spawn-fcgi.service
+             ├─10674 /usr/bin/php-cgi
+             ├─10675 /usr/bin/php-cgi
+             ... (всего 33 процесса)
+
+ls -l /var/run/php-fcgi.sock
+ls: cannot access '/var/run/php-fcgi.sock': No such file or directory
+
+# 3. Несколько инстансов Nginx
+
+apt install -y nginx
+
+cat > /etc/systemd/system/nginx@.service <<'EOF'
+[Unit]
+Description=A high performance web server and a reverse proxy server
+Documentation=man:nginx(8)
+After=network.target nss-lookup.target
+[Service]
+Type=forking
+PIDFile=/run/nginx-%I.pid
+ExecStartPre=/usr/sbin/nginx -t -c /etc/nginx/nginx-%I.conf -q -g 'daemon on; master_process on;'
+ExecStart=/usr/sbin/nginx -c /etc/nginx/nginx-%I.conf -g 'daemon on; master_process on;'
+ExecReload=/usr/sbin/nginx -c /etc/nginx/nginx-%I.conf -g 'daemon on; master_process on;' -s reload
+ExecStop=-/sbin/start-stop-daemon --quiet --stop --retry QUIT/5 --pidfile /run/nginx-%I.pid
+TimeoutStopSec=5
+KillMode=mixed
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cp /etc/nginx/nginx.conf /etc/nginx/nginx-first.conf
+cp /etc/nginx/nginx.conf /etc/nginx/nginx-second.conf
+
+sed -i 's|pid /run/nginx.pid;|pid /run/nginx-first.pid;|' /etc/nginx/nginx-first.conf
+sed -i '/http {/a \    server {\n        listen 9001;\n        location / { root /var/www/html; }\n    }' /etc/nginx/nginx-first.conf
+sed -i 's|pid /run/nginx.pid;|pid /run/nginx-second.pid;|' /etc/nginx/nginx-second.conf
+sed -i '/http {/a \    server {\n        listen 9002;\n        location / { root /var/www/html; }\n    }' /etc/nginx/nginx-second.conf
+sed -i 's/include \/etc\/nginx\/sites-enabled\/\*;//' /etc/nginx/nginx-first.conf /etc/nginx/nginx-second.conf
+
+nginx -t -c /etc/nginx/nginx-first.conf
+nginx: the configuration file /etc/nginx/nginx-first.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx-first.conf test is successful
+
+nginx -t -c /etc/nginx/nginx-second.conf
+nginx: the configuration file /etc/nginx/nginx-second.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx-second.conf test is successful
+
+systemctl daemon-reload
+systemctl start nginx@first
+systemctl start nginx@second
+
+ss -tulnp | grep nginx
+tcp   LISTEN 0      511               0.0.0.0:9002      0.0.0.0:*    users:(("nginx",pid=11103,fd=5),("nginx",pid=11102,fd=5),("nginx",pid=11101,fd=5))
+tcp   LISTEN 0      511               0.0.0.0:9001      0.0.0.0:*    users:(("nginx",pid=11094,fd=5),("nginx",pid=11093,fd=5),("nginx",pid=11092,fd=5))
+tcp   LISTEN 0      511               0.0.0.0:80        0.0.0.0:*    users:(("nginx",pid=10956,fd=5),("nginx",pid=10955,fd=5),("nginx",pid=10953,fd=5))
+tcp   LISTEN 0      511                  [::]:80           [::]:*    users:(("nginx",pid=10956,fd=6),("nginx",pid=10955,fd=6),("nginx",pid=10953,fd=6))
+
+ps aux | grep nginx
+root       10953  0.0  0.3  11196  6912 ?        S    15:21   0:00 nginx: master process /usr/sbin/nginx -g daemon on; master_process on;
+www-data   10955  0.0  0.2  12884  4404 ?        S    15:21   0:00 nginx: worker process
+www-data   10956  0.0  0.2  12884  4404 ?        S    15:21   0:00 nginx: worker process
+root       11092  0.0  0.0  11156  1584 ?        Ss   15:24   0:00 nginx: master process /usr/sbin/nginx -c /etc/nginx/nginx-first.conf -g daemon on; master_process on;
+www-data   11093  0.0  0.2  12880  4528 ?        S    15:24   0:00 nginx: worker process
+www-data   11094  0.0  0.2  12880  4144 ?        S    15:24   0:00 nginx: worker process
+root       11101  0.0  0.0  11156  1740 ?        Ss   15:24   0:00 nginx: master process /usr/sbin/nginx -c /etc/nginx/nginx-second.conf -g daemon on; master_process on;
+www-data   11102  0.0  0.2  12880  4300 ?        S    15:24   0:00 nginx: worker process
+www-data   11103  0.0  0.2  12880  4172 ?        S    15:24   0:00 nginx: worker process
+root       11128  0.0  0.1   6544  2304 pts/2    S+   15:25   0:00 grep --color=auto nginx
+
+curl http://localhost:9001
+<html>
+<head><title>403 Forbidden</title></head>
+<body>
+<center><h1>403 Forbidden</h1></center>
+<hr><center>nginx/1.24.0 (Ubuntu)</center>
+</body>
+</html>
+
+curl http://localhost:9002
+<html>
+<head><title>403 Forbidden</title></head>
+<body>
+<center><h1>403 Forbidden</h1></center>
+<hr><center>nginx/1.24.0 (Ubuntu)</center>
+</body>
+</html>
