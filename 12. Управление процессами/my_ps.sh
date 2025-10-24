@@ -22,7 +22,7 @@ for pid in /proc/[0-9]*; do
         tty="pts/$(($tty_nr - 64))" 
     fi
 
-    # Читаем команду из cmdline (если есть)
+    # Читаем команду из cmdline
     if [[ -f "$pid/cmdline" ]]; then
         IFS=$'\0' read -r -d '' -a cmd < "$pid/cmdline" 2>/dev/null || cmd=("${comm//[\(\)]/}")
         cmd_str="${cmd[*]}"
