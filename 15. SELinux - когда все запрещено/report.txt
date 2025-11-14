@@ -1,0 +1,99 @@
+# Домашнее задание: Запуск nginx на нестандартном порту 8081 тремя способами с использованием SELinux
+# Цель: диагностировать и разрешить проблему SELinux при запуске nginx на порту 8081.
+
+# Диагностика
+
+systemctl start nginx
+Job for nginx.service failed...
+nginx: [emerg] bind() to 0.0.0.0:8081 failed (13: Permission denied)
+
+sestatus
+SELinux status:                 enabled
+Current mode:                   enforcing
+
+ausearch -m avc -ts recent | grep nginx
+avc:  denied  { name_bind } for ... src=8081 scontext=system_u:system_r:httpd_t:s0 tcontext=system_u:object_r:transproxy_port_t:s0
+
+# Вывод: SELinux блокирует привязку nginx (тип httpd_t) к порту 8081, потому что он имеет тип transproxy_port_t, а не http_port_t.
+
+
+# Способ 1: Переключатели setsebool
+
+getsebool -a | grep httpd_can_network_connect
+setsebool -P httpd_can_network_connect on
+systemctl restart nginx
+
+httpd_can_network_connect --> on
+nginx успешно перезапущен (active), но: это происходит не благодаря setsebool, а потому что ранее порт 8081 был добавлен в http_port_t.
+
+# Для проверки: если бы порт остался только transproxy_port_t, setsebool не помог бы, он управляет исходящими подключениями (connect), а не входящим bind().
+
+# Вывод: setsebool не решает проблему нестандартного порта.
+
+
+# Способ 2: Добавление порта в имеющийся тип (http_port_t) ---
+
+semanage port -l | grep 8081
+transproxy_port_t              tcp      8081
+
+semanage port -a -t http_port_t -p tcp 8081
+Port tcp/8081 already defined, modifying instead
+
+
+semanage port -l | grep 8081
+http_port_t                    tcp      8081, 80, 81, 443, 488, 8008, 8009, 8443, 9000
+transproxy_port_t              tcp      8081
+
+systemctl start nginx
+systemctl status nginx
+Active: active (running)
+
+ss -tuln | grep :8081
+tcp   LISTEN 0      511          0.0.0.0:8081      0.0.0.0:*
+
+curl -s http://localhost:8081 | head -1
+<!DOCTYPE html>
+
+# Вывод: Способ успешен. Порт 8081 добавлен в http_port_t рекомендуемый и безопасный способ.
+
+# Способ 3: Формирование и установка модуля SELinux
+
+grep nginx /var/log/audit/audit.log | audit2allow -M nginx_8081_transproxy
+******************** ВАЖНО ***********************
+Чтобы сделать этот пакет политики активным, выполните:
+semodule -i nginx_8081_transproxy.pp
+
+cat nginx_8081_transproxy.te
+module nginx_8081_transproxy 1.0;
+
+require {
+        type transproxy_port_t;
+        type httpd_t;
+        class tcp_socket name_bind;
+}
+
+============= httpd_t ==============
+allow httpd_t transproxy_port_t:tcp_socket name_bind;
+
+
+semodule -i nginx_8081_transproxy.pp
+semodule -l | grep -i nginx
+nginx_8081_transproxy
+
+# Проверка: Даже если порт останется transproxy_port_t (без http_port_t), модуль разрешает bind.
+# Вывод: Способ успешен. Модуль даёт прямое разрешение на name_bind к transproxy_port_t.
+
+# Итоговая проверка
+
+sestatus
+Current mode: enforcing
+
+ausearch -m avc -ts recent | grep nginx || echo "No AVC denials — SELinux happy!"
+No AVC denials — SELinux happy!
+
+# Все три способа реализованы:
+# 1. setsebool. Показана его неэффективность для bind.
+# 2. semanage port. Основной рабочий способ.
+# 3. модуль SELinux. Альтернативный способ с полным контролем политики.
+
+# nginx работает на порту 8081 в режиме enforcing без ошибок SELinux.
