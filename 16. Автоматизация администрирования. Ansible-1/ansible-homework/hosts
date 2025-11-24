@@ -1,0 +1,2 @@
+[web]
+172.22.226.192 ansible_user=vagrant ansible_ssh_private_key_file=/home/vagrant/.ssh/vagrant_key

@@ -1,0 +1,47 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+
+  config.vm.define "nginx" do |box|
+    box.vm.box = "myubuntu"
+    box.vm.hostname = "nginx"
+
+    # Private network IP и проброс порта 8080
+    box.vm.network "private_network", ip: "172.22.226.192"
+    box.vm.network "forwarded_port", guest: 80, host: 8080
+
+    # Hyper-V provider settings
+    box.vm.provider "hyperv" do |hv|
+      hv.memory = 1024
+      hv.cpus = 1
+      hv.enable_virtualization_extensions = true
+      hv.enable_enhanced_session_mode = false
+    end
+
+    # Включаем синхронизированную папку для копирования файлов
+    config.vm.synced_folder ".", "/vagrant"
+
+    # Настройка SSH и создание каталога ansible-homework
+    box.vm.provision "shell", inline: <<-SHELL
+      # Создаём каталог для проекта
+      mkdir -p /home/vagrant/ansible-homework
+
+      # Копируем файлы проекта на VM
+      cp /vagrant/ansible.cfg /home/vagrant/ansible-homework/
+      cp /vagrant/nginx.yml /home/vagrant/ansible-homework/
+      cp -r /vagrant/roles /home/vagrant/ansible-homework/
+      cp -r /vagrant/templates /home/vagrant/ansible-homework/
+      cp /vagrant/hosts /home/vagrant/ansible-homework/
+      cp /vagrant/Vagrantfile /home/vagrant/ansible-homework/
+
+      # Настройка SSH для root (если нужно)
+      mkdir -p /root/.ssh
+      cp /home/vagrant/.ssh/authorized_keys /root/.ssh/
+
+      # Права на каталог и файлы
+      chown -R vagrant:vagrant /home/vagrant/ansible-homework
+    SHELL
+  end
+
+end

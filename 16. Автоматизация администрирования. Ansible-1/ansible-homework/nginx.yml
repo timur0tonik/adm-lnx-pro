@@ -1,0 +1,10 @@
+---
+- name: Install and configure NGINX
+  hosts: web
+  become: true
+
+  vars:
+    nginx_listen_port: 80
+
+  roles:
+    - nginx
