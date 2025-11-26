@@ -1,0 +1,62 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.define "disk-net" do |box|
+    box.vm.box = "myubuntu"
+    box.vm.hostname = "disk-net"
+
+    box.vm.provider "hyperv" do |hv|
+      hv.memory = 1024
+      hv.cpus = 1
+      hv.enable_virtualization_extensions = true
+      hv.enable_enhanced_session_mode = false
+    end
+
+    # Отключение synced folder
+    config.vm.synced_folder ".", "/vagrant", disabled: true
+
+    box.vm.provision "shell", inline: <<-SHELL
+      set -e
+
+      # --- 1. Loop-диски (идемпотентно) ---
+      mkdir -p /disk-images
+      [ ! -f /disk-images/disk1.img ] && dd if=/dev/zero of=/disk-images/disk1.img bs=1M count=1024 status=none
+      [ ! -f /disk-images/disk2.img ] && dd if=/dev/zero of=/disk-images/disk2.img bs=1M count=1024 status=none
+
+      [ ! -b /dev/loop0 ] || ! losetup /dev/loop0 2>/dev/null && losetup /dev/loop0 /disk-images/disk1.img
+      [ ! -b /dev/loop1 ] || ! losetup /dev/loop1 2>/dev/null && losetup /dev/loop1 /disk-images/disk2.img
+
+      blkid /dev/loop0 | grep -q 'TYPE="ext4"' || mkfs.ext4 -F /dev/loop0
+      blkid /dev/loop1 | grep -q 'TYPE="ext4"' || mkfs.ext4 -F /dev/loop1
+
+      mkdir -p /mnt/disk1 /mnt/disk2
+      mountpoint -q /mnt/disk1 || mount /dev/loop0 /mnt/disk1
+      mountpoint -q /mnt/disk2 || mount /dev/loop1 /mnt/disk2
+
+      UUID1=$(blkid -s UUID -o value /dev/loop0)
+      UUID2=$(blkid -s UUID -o value /dev/loop1)
+
+      grep -q "$UUID1.*disk1" /etc/fstab || echo "UUID=$UUID1 /mnt/disk1 ext4 defaults,nofail 0 2" >> /etc/fstab
+      grep -q "$UUID2.*disk2" /etc/fstab || echo "UUID=$UUID2 /mnt/disk2 ext4 defaults,nofail 0 2" >> /etc/fstab
+
+      # --- 2. nginx ---
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
+      systemctl enable nginx
+      systemctl start nginx
+      echo "<h1>Disk & Network HW — nginx works!</h1>" > /var/www/html/index.html
+
+      # --- 3. SSH password auth ---
+      sed -i 's/#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+      systemctl restart ssh
+
+      # --- 4. IP detection & export ---
+      VM_IP=$(ip -4 -br addr show eth0 | awk '{print $3}' | cut -d/ -f1)
+      echo "==> VM IP: http://$VM_IP (nginx)"
+      echo "VM_IP=$VM_IP" | sudo tee /etc/vm-ip.conf > /dev/null
+
+      echo "Provisioning completed: disks mounted, nginx running, IP saved."
+    SHELL
+  end
+end
