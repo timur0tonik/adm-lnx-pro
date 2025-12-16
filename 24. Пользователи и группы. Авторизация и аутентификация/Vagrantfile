@@ -1,0 +1,77 @@
+Vagrant.configure("2") do |config|
+  config.vm.define "pam-hw" do |box|
+    box.vm.box = "myubuntu"
+    box.vm.hostname = "pam-hw"
+
+    box.vm.provider "hyperv" do |hv|
+      hv.memory = 1024
+      hv.cpus = 1
+      hv.enable_virtualization_extensions = true
+      hv.enable_enhanced_session_mode = false
+    end
+
+    config.vm.synced_folder ".", "/vagrant", disabled: true
+
+    # provisioiner: inline shell
+    box.vm.provision "shell", inline: <<-SHELL
+      #!/bin/bash
+      set -euo pipefail
+      echo "[+] Starting PAM HW provisioning (inline)..."
+
+      # 1. Wait for network & apt lock
+      while fuser /var/lib/dpkg/lock* >/dev/null 2>&1; do sleep 1; done
+      apt-get update -qq
+
+      # 2. Users
+      id timur >/dev/null 2>&1 || { useradd -m -s /bin/bash -G sudo timur; echo "timur:password" | chpasswd; }
+      id dockeruser >/dev/null 2>&1 || { useradd -m -s /bin/bash dockeruser; echo "dockeruser:dockerpass" | chpasswd; }
+
+      # 3. Docker
+      apt-get install -y docker.io
+      systemctl enable --now docker
+      usermod -aG docker dockeruser
+
+      # 4. sudo for dockeruser
+      echo 'dockeruser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart docker.service, /usr/bin/docker *' > /etc/sudoers.d/dockeruser
+      chmod 440 /etc/sudoers.d/dockeruser
+
+      # 5. pam-holiday-check
+      cat > /usr/local/bin/pam-holiday-check <<'EOF'
+#!/bin/bash
+TODAY=$(date +%Y-%m-%d)
+WEEKDAY=$(date +%u)  # 1=Mon ... 7=Sun
+
+HOLIDAYS="
+2025-12-16
+2025-12-17
+2026-01-01
+"
+
+if [[ $WEEKDAY -ge 1 && $WEEKDAY -le 5 ]]; then exit 0; fi
+if echo "$HOLIDAYS" | grep -q "^\\$TODAY\\$"; then exit 0; fi
+exit 1
+EOF
+      chmod +x /usr/local/bin/pam-holiday-check
+
+      # 6. PAM: inject pam_exec & pam_time
+      if ! grep -q pam_exec /etc/pam.d/common-account; then
+        sed -i '1i account\trequired\tpam_exec.so quiet /usr/local/bin/pam-holiday-check' /etc/pam.d/common-account
+      fi
+      if ! grep -q pam_time /etc/pam.d/common-account; then
+        echo "account required pam_time.so" >> /etc/pam.d/common-account
+      fi
+
+      # 7. time.conf
+      cat > /etc/security/time.conf <<'EOF'
+*;*;@sudo;Al0000-2400
+*;*;dockeruser;Al0000-2400
+*;*;*;!Wd0000-2400|Wd0600-2400
+EOF
+
+      echo "[✓] Provisioning complete."
+      IP=$(ip -4 addr show eth0 | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
+      echo "VM IP: $IP"
+      echo "Test: ssh timur@$IP (password: password)"
+    SHELL
+  end
+end
