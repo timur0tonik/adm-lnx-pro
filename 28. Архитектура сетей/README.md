@@ -5,7 +5,7 @@
 
 ## Архитектура
 Office1 ---\
-                   -----> Central --IRouter --> internet
+                     -----> Central --IRouter --> internet
 Office2----/
 
 
