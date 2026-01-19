@@ -3,11 +3,6 @@
 ## Цель
 Научиться менять базовые сетевые настройки в Linux-based системах.
 
-## Архитектура
-Office1 ---\
-                     -----> Central --IRouter --> internet
-Office2----/
-
 
 ### Серверы
 - inetRouter
