@@ -1,0 +1,92 @@
+---
+- name: Configure inetRouter
+  hosts: inet_router
+  become: yes
+  tasks:
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: Ensure default route exists
+      command: ip route add default via 10.0.2.2 dev enp0s3
+      ignore_errors: yes
+
+    - name: Configure NAT for internal networks
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        destination: !192.168.0.0/16
+        out_interface: enp0s3
+        jump: MASQUERADE
+
+- name: Configure centralRouter
+  hosts: central_router
+  become: yes
+  tasks:
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: Remove default NAT route
+      command: ip route del default via 10.0.2.2 dev enp0s3
+      ignore_errors: yes
+
+    - name: Set default gateway to inetRouter
+      command: ip route add default via 192.168.255.1
+
+    - name: Add static routes to office1 and office2
+      command: "{{ item }}"
+      loop:
+        - ip route add 192.168.2.0/24 via 192.168.2.2
+        - ip route add 192.168.1.0/24 via 192.168.1.2
+
+    - name: Enable NAT for all internal traffic
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        source: 192.168.0.0/16
+        out_interface: enp0s8
+        jump: MASQUERADE
+
+- name: Configure office routers
+  hosts: office1_router:office2_router
+  become: yes
+  tasks:
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: Remove default NAT route
+      command: ip route del default via 10.0.2.2 dev enp0s3
+      ignore_errors: yes
+
+    - name: Set default gateway (conditional)
+      command: "{{ gateway_cmd }}"
+      vars:
+        gateway_cmd: "{% if 'office1' in inventory_hostname %}ip route add default via 192.168.2.1{% else %}ip route add default via 192.168.1.1{% endif %}"
+
+- name: Configure servers
+  hosts: servers
+  become: yes
+  tasks:
+    - name: Remove default NAT route
+      command: ip route del default via 10.0.2.2 dev enp0s3
+      ignore_errors: yes
+
+    - name: Set default gateway (conditional)
+      command: "{{ gateway_cmd }}"
+      vars:
+        gateway_cmd: >-
+          {% if 'central' in inventory_hostname %}ip route add default via 192.168.0.1
+          {% elif 'office1' in inventory_hostname %}ip route add default via 192.168.2.65
+          {% elif 'office2' in inventory_hostname %}ip route add default via 192.168.1.129
+          {% endif %}
