@@ -13,8 +13,8 @@
 ## Функционал
 - DHCP + TFTP через dnsmasq
 - HTTP-сервер через Apache для раздачи:
-    - - ядра (vmlinuz)
-    - - initrd (initrd)
-    - - файлов user-data и meta-data для cloud-init
+    - ядра (vmlinuz)
+    - initrd (initrd)
+    - файлов user-data и meta-data для cloud-init
 - GRUB UEFI PXE — поддержка современных систем
 - Автоматическая установка с предустановленным пользователем vagrant:vagrant
