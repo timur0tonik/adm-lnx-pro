@@ -1,0 +1,132 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.ssh.username = "vagrant"
+  config.ssh.password = "vagrant"
+  config.ssh.insert_key = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  config.vm.define "pxe-server" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "pxe-server"
+
+    # Сеть для PXE-клиентов (внутренняя сеть VirtualBox)
+    node.vm.network "private_network",
+      ip: "192.168.100.1",
+      netmask: "255.255.255.0",
+      virtualbox__intnet: "pxe-net"
+
+    node.vm.provision "shell", inline: <<-SHELL
+      set -eux
+
+      #1. Обновление системы
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+
+      #2. Установка необходимых пакетов
+      apt-get install -y apache2 dnsmasq wget curl grub-efi-amd64-signed shim-signed
+
+      #3. Настройка TFTP-каталога
+      mkdir -p /tftpboot/{grub,x86_64-efi}
+      chown -R nobody:nogroup /tftpboot
+
+      #4. Скачивание Ubuntu 24.04 Live Server ISO
+      cd /tmp
+      echo "Скачиваем Ubuntu 24.04 Live Server ISO..."
+      curl -L -o ubuntu-24.04-live-server-amd64.iso \
+        https://old-releases.ubuntu.com/releases/24.04/ubuntu-24.04-live-server-amd64.iso
+
+      file_size=$(stat -c%s ubuntu-24.04-live-server-amd64.iso)
+      if [ "$file_size" -lt 1000000 ]; then
+        echo "Ошибка: файл слишком маленький — возможно, 404 или редирект"
+        cat ubuntu-24.04-live-server-amd64.iso
+        exit 1
+      fi
+
+      #5. Монтирование ISO и копирование ядра
+      modprobe loop || true
+      mkdir -p /mnt/iso
+      mount -o loop ubuntu-24.04-live-server-amd64.iso /mnt/iso
+      cp /mnt/iso/casper/vmlinuz /var/www/html/
+      cp /mnt/iso/casper/initrd /var/www/html/
+      umount /mnt/iso
+      rm -f ubuntu-24.04-live-server-amd64.iso
+
+      #6. user-data для автоматической установки
+cat >/var/www/html/user-data <<'EOF'
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US
+  keyboard:
+    layout: us
+  network:
+    network:
+      version: 2
+      ethernets:
+        enp0s8:
+          dhcp4: true
+  storage:
+    layout:
+      name: direct
+  identity:
+    hostname: ubuntu-auto
+    username: vagrant
+    password: "vagrant"
+  ssh:
+    install-server: true
+    allow-pw: true
+  disable_root: false
+EOF
+
+      # meta-data (обязательный, даже если пустой)
+      touch /var/www/html/meta-data
+
+      #7. GRUB для UEFI PXE
+      cp /usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed /tftpboot/x86_64-efi/grubx64.efi
+
+      #8. Конфигурация GRUB
+mkdir -p /tftpboot/grub
+cat >/tftpboot/grub/grub.cfg <<'EOF'
+insmod all_video
+set default="0"
+set timeout=5
+
+menuentry "Ubuntu 24.04 Autoinstall (UEFI)" {
+    linux /vmlinuz autoinstall ds=nocloud-net;s=http://192.168.100.1/ ---
+    initrd /initrd
+}
+EOF
+
+      #9. Конфигурация dnsmasq (DHCP + TFTP)
+cat >/etc/dnsmasq.conf <<'EOF'
+interface=enp0s8
+bind-interfaces
+dhcp-range=192.168.100.10,192.168.100.100,12h
+dhcp-boot=x86_64-efi/grubx64.efi
+enable-tftp
+tftp-root=/tftpboot
+dhcp-option-force=option:router,192.168.100.1
+dhcp-option-force=option:dns-server,8.8.8.8
+log-dhcp
+EOF
+
+      #10. Запуск и включение сервисов
+      systemctl enable --now apache2
+      systemctl restart apache2
+
+      systemctl enable --now dnsmasq
+      systemctl restart dnsmasq
+
+      #11. Настройка SSH для root (для отладки)
+      mkdir -p ~root/.ssh
+      cp ~vagrant/.ssh/authorized_keys ~root/.ssh/
+      sed -i 's/#\\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+      sed -i 's/#\\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+      systemctl restart ssh
+
+      echo "PXE-сервер готов! IP: 192.168.100.1"
+    SHELL
+  end
+end
