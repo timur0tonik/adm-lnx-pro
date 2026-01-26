@@ -1,0 +1,146 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.ssh.username = "vagrant"
+  config.ssh.password = "vagrant"
+  config.ssh.insert_key = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 512
+    vb.cpus = 1
+  end
+
+  # Вспомогательная функция: ожидание освобождения dpkg
+  $wait_for_dpkg = <<-'SHELL'
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+      echo "Ждём завершения unattended-upgrades..."
+      sleep 5
+    done
+  SHELL
+
+
+  # centralRouter — внутренний шлюз
+
+  config.vm.define "centralRouter" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "centralRouter"
+
+    node.vm.network "private_network",
+      ip: "10.0.0.254",
+      netmask: "255.255.255.0",
+      virtualbox__intnet: "internal-net"
+
+    node.vm.provision "shell", inline: $wait_for_dpkg + <<-SHELL
+      set -eux
+
+      # Включить IP forwarding
+      echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+      sysctl -p
+
+      # Установка knockd для port knocking
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y knockd iptables-persistent
+
+      # Маршрут по умолчанию через inetRouter
+      ip route add default via 10.0.0.2 || true
+    SHELL
+  end
+
+
+  # inetRouter — основной интернет-шлюз с NAT и port knocking
+
+  config.vm.define "inetRouter" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "inetRouter"
+
+    node.vm.network "private_network",
+      ip: "10.0.0.2",
+      netmask: "255.255.255.0",
+      virtualbox__intnet: "internal-net"
+
+    node.vm.provision "shell", inline: $wait_for_dpkg + <<-SHELL
+      set -eux
+
+      # Включить IP forwarding
+      echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+      sysctl -p
+
+      # Установка SSH и iptables
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server iptables-persistent
+
+      # Отключить ufw (если вдруг включён)
+      ufw disable 2>/dev/null || true
+
+      # Базовые правила INPUT
+      iptables -P INPUT DROP
+      iptables -A INPUT -i lo -j ACCEPT
+      iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+      # Port knocking: 3210 → 4321 → 5432 → открывает SSH
+      iptables -N KNOCKING
+      iptables -A INPUT -j KNOCKING
+      iptables -A KNOCKING -p tcp --dport 3210 -m recent --set --name KNOCK1 -j DROP
+      iptables -A KNOCKING -p tcp --dport 4321 -m recent --rcheck --seconds 10 --name KNOCK1 -m recent --set --name KNOCK2 -j DROP
+      iptables -A KNOCKING -p tcp --dport 5432 -m recent --rcheck --seconds 10 --name KNOCK2 -m recent --set --name KNOCKED -j DROP
+      iptables -A INPUT -p tcp --dport 22 -m recent --rcheck --name KNOCKED -j ACCEPT
+
+      # NAT для выхода в интернет (enp0s3 — NAT-интерфейс от VirtualBox)
+      iptables -t nat -A POSTROUTING -o enp0s3 -j MASQUERADE
+      iptables -A FORWARD -i enp0s8 -o enp0s3 -j ACCEPT
+      iptables -A FORWARD -i enp0s3 -o enp0s8 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+      # Сохранить правила
+      netfilter-persistent save
+    SHELL
+  end
+
+
+  # inetRouter2 — проброс 8080 → 80
+
+  config.vm.define "inetRouter2" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "inetRouter2"
+
+    node.vm.network "private_network",
+      ip: "10.0.0.3",
+      netmask: "255.255.255.0",
+      virtualbox__intnet: "internal-net"
+
+    # Проброс порта с хоста Windows
+    node.vm.network "forwarded_port", guest: 80, host: 8080, auto_correct: true
+
+    node.vm.provision "shell", inline: $wait_for_dpkg + <<-SHELL
+      set -eux
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
+      systemctl enable --now nginx
+      iptables -P INPUT ACCEPT
+    SHELL
+  end
+
+
+  # centralServer — веб-сервер
+
+  config.vm.define "centralServer" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "centralServer"
+
+    node.vm.network "private_network",
+      ip: "10.0.0.10",
+      netmask: "255.255.255.0",
+      virtualbox__intnet: "internal-net"
+
+    node.vm.provision "shell", inline: $wait_for_dpkg + <<-SHELL
+      set -eux
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
+      ip route add default via 10.0.0.254
+      systemctl enable --now nginx
+      iptables -P INPUT ACCEPT
+    SHELL
+  end
+end
