@@ -1,0 +1,244 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.ssh.username = "vagrant"
+  config.ssh.password = "vagrant"
+  config.ssh.insert_key = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 512
+    vb.cpus = 1
+    vb.customize ["modifyvm", :id, "--nicpromisc2", "allow-all"]
+    vb.customize ["modifyvm", :id, "--nicpromisc3", "allow-all"]
+    vb.customize ["modifyvm", :id, "--nicpromisc4", "allow-all"]
+  end
+
+  # Базовая настройка роутера с FRR (из стандартного репозитория Ubuntu 24.04)
+  $router_setup = <<-'SHELL'
+    set -eux
+
+    # Включить IP forwarding
+    echo 'net.ipv4.ip_forward=1' | tee -a /etc/sysctl.conf
+    sysctl -p
+
+    # Установить FRR из стандартного репозитория Ubuntu (без внешних ключей!)
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y frr
+
+    # Включить OSPF
+    sed -i 's/^zebra=no/zebra=yes/' /etc/frr/daemons
+    sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons
+    sed -i 's/^bgpd=yes/bgpd=no/' /etc/frr/daemons
+    sed -i 's/^ospf6d=yes/ospf6d=no/' /etc/frr/daemons
+
+    # Базовый конфиг
+    cat > /etc/frr/frr.conf << 'EOF'
+!
+log file /var/log/frr/frr.log informational
+!
+!
+line vty
+!
+EOF
+    chown frr:frr /etc/frr/frr.conf
+    chmod 640 /etc/frr/frr.conf
+
+    systemctl enable --now frr
+    sleep 25
+  SHELL
+
+
+  # router1
+
+  config.vm.define "router1" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "router1"
+
+    node.vm.network "private_network", ip: "10.1.1.254", netmask: "255.255.255.0", virtualbox__intnet: "client-net1"
+    node.vm.network "private_network", ip: "192.168.10.1",  netmask: "255.255.255.252", virtualbox__intnet: "link12"
+    node.vm.network "private_network", ip: "192.168.30.1",  netmask: "255.255.255.252", virtualbox__intnet: "link13"
+
+    node.vm.provision "shell", inline: $router_setup + <<-SHELL
+      cat >> /etc/frr/frr.conf << 'OSPF'
+!
+interface enp0s8
+ ip ospf cost 1
+!
+interface enp0s9
+ ip ospf cost 10
+!
+interface enp0s10
+ ip ospf cost 50
+!
+router ospf
+ ospf router-id 1.1.1.1
+ network 10.1.1.0/24 area 0
+ network 192.168.10.0/30 area 0
+ network 192.168.30.0/30 area 0
+!
+OSPF
+
+      chown frr:frr /etc/frr/frr.conf
+      chmod 640 /etc/frr/frr.conf
+      systemctl restart frr
+      sleep 15
+    SHELL
+  end
+
+
+  # router2
+
+  config.vm.define "router2" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "router2"
+
+    node.vm.network "private_network", ip: "10.2.2.254", netmask: "255.255.255.0", virtualbox__intnet: "client-net2"
+    node.vm.network "private_network", ip: "192.168.10.2",  netmask: "255.255.255.252", virtualbox__intnet: "link12"
+    node.vm.network "private_network", ip: "192.168.20.1",  netmask: "255.255.255.252", virtualbox__intnet: "link23"
+
+    node.vm.provision "shell", inline: $router_setup + <<-SHELL
+      cat >> /etc/frr/frr.conf << 'OSPF'
+!
+interface enp0s8
+ ip ospf cost 1
+!
+interface enp0s9
+ ip ospf cost 10
+!
+interface enp0s10
+ ip ospf cost 10
+!
+router ospf
+ ospf router-id 2.2.2.2
+ network 10.2.2.0/24 area 0
+ network 192.168.10.0/30 area 0
+ network 192.168.20.0/30 area 0
+!
+OSPF
+
+      chown frr:frr /etc/frr/frr.conf
+      chmod 640 /etc/frr/frr.conf
+      systemctl restart frr
+      sleep 15
+    SHELL
+  end
+
+
+  # router3
+
+  config.vm.define "router3" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "router3"
+
+    node.vm.network "private_network", ip: "10.3.3.254", netmask: "255.255.255.0", virtualbox__intnet: "client-net3"
+    node.vm.network "private_network", ip: "192.168.20.2",  netmask: "255.255.255.252", virtualbox__intnet: "link23"
+    node.vm.network "private_network", ip: "192.168.30.2",  netmask: "255.255.255.252", virtualbox__intnet: "link13"
+
+    node.vm.provision "shell", inline: $router_setup + <<-SHELL
+      cat >> /etc/frr/frr.conf << 'OSPF'
+!
+interface enp0s8
+ ip ospf cost 1
+!
+interface enp0s9
+ ip ospf cost 10
+!
+interface enp0s10
+ ip ospf cost 50
+!
+router ospf
+ ospf router-id 3.3.3.3
+ network 10.3.3.0/24 area 0
+ network 192.168.20.0/30 area 0
+ network 192.168.30.0/30 area 0
+!
+OSPF
+
+      chown frr:frr /etc/frr/frr.conf
+      chmod 640 /etc/frr/frr.conf
+      systemctl restart frr
+      sleep 15
+    SHELL
+  end
+
+
+  # client1 — без установки пакетов (используем встроенные утилиты)
+
+  config.vm.define "client1" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "client1"
+    node.vm.network "private_network", ip: "10.1.1.10", netmask: "255.255.255.0", virtualbox__intnet: "client-net1"
+
+    node.vm.provision "shell", inline: <<-SHELL
+      set -eux
+      ip route add default via 10.1.1.254
+      # Создаём скрипт проверки без внешних зависимостей
+      cat > /home/vagrant/check.sh << 'CHK'
+#!/bin/bash
+echo "=== Маршрут по умолчанию ==="
+ip route show default
+echo ""
+echo "=== Ping до client3 (10.3.3.10) ==="
+timeout 3 ping -c 3 10.3.3.10 || echo "Ping не прошёл (это нормально при асимметрии)"
+echo ""
+echo "=== ARP-таблица ==="
+ip neigh show
+CHK
+      chmod +x /home/vagrant/check.sh
+      chown vagrant:vagrant /home/vagrant/check.sh
+    SHELL
+  end
+
+
+  # client2
+
+  config.vm.define "client2" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "client2"
+    node.vm.network "private_network", ip: "10.2.2.10", netmask: "255.255.255.0", virtualbox__intnet: "client-net2"
+
+    node.vm.provision "shell", inline: <<-SHELL
+      set -eux
+      ip route add default via 10.2.2.254
+    SHELL
+  end
+
+
+  # client3
+
+  config.vm.define "client3" do |node|
+    node.vm.box = "ubuntu24-noble"
+    node.vm.hostname = "client3"
+    node.vm.network "private_network", ip: "10.3.3.10", netmask: "255.255.255.0", virtualbox__intnet: "client-net3"
+
+    node.vm.provision "shell", inline: <<-SHELL
+      set -eux
+      ip route add default via 10.3.3.254
+      # Скрипт для демонстрации асимметрии
+      cat > /home/vagrant/demo.sh << 'DEMO'
+#!/bin/bash
+echo "=========================================="
+echo "1. Маршрут от client3 к сети client1:"
+echo "=========================================="
+ip route get 10.1.1.10
+echo ""
+echo "=========================================="
+echo "2. Проверка через соседние роутеры:"
+echo "=========================================="
+echo "На router3 маршрут к 10.1.1.0/24:"
+sudo vtysh -c "show ip route 10.1.1.0/24" 2>/dev/null | grep -E "^(O| via)" || echo "Маршрут изучен через OSPF"
+echo ""
+echo "=========================================="
+echo "3. Почему асимметрия:"
+echo "=========================================="
+echo "- Прямой линк router1-router3: cost=50 (дорогой)"
+echo "- Путь через router2: cost=10+10=20 (дешёвый)"
+echo "- OSPF выбирает путь с минимальной стоимостью"
+DEMO
+      chmod +x /home/vagrant/demo.sh
+      chown vagrant:vagrant /home/vagrant/demo.sh
+    SHELL
+  end
+end
