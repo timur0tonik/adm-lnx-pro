@@ -1,0 +1,464 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.ssh.username = "vagrant"
+  #config.ssh.password = "vagrant"
+  config.ssh.insert_key = false
+  config.ssh.forward_agent = false      # КРИТИЧЕСКИ ВАЖНО для Windows
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.boot_timeout = 600          # Увеличенный таймаут
+
+  # Простые настройки провайдера БЕЗ machinefolder
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 512
+    vb.cpus = 1
+    vb.gui = false
+  end
+
+  # Базовая настройка ОС
+  $base_setup = <<-'SHELL'
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # Обновление системы
+    apt-get update
+    apt-get install -y curl wget iperf3 net-tools iproute2 dnsutils bridge-utils
+    
+    # Отключение cloud-init для стабильности сетевых имён
+    systemctl disable --now cloud-init
+  SHELL
+
+  # Установка OpenVPN и подготовка PKI
+  $openvpn_pki_setup = $base_setup + <<-'SHELL'
+    apt-get install -y openvpn easy-rsa iptables-persistent
+    
+    # Включение IP forwarding
+    echo 'net.ipv4.ip_forward=1' | tee -a /etc/sysctl.conf
+    sysctl -p
+    
+    # Настройка NAT
+    iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o enp0s3 -j MASQUERADE
+    iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    iptables -A FORWARD -s 10.0.0.0/8 -j ACCEPT
+    netfilter-persistent save
+  SHELL
+
+  # ======================
+  # tun-server: OpenVPN сервер в режиме TUN
+  # ======================
+  config.vm.define "tun-server" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "tun-server"
+    node.vm.network "private_network", ip: "192.168.100.10", netmask: "255.255.255.0"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+    end
+
+    node.vm.provision "shell", inline: $openvpn_pki_setup + <<-SHELL
+      # Подготовка PKI для TUN
+      mkdir -p /etc/openvpn/easy-rsa/pki
+      cp -r /usr/share/easy-rsa/* /etc/openvpn/easy-rsa/
+      cd /etc/openvpn/easy-rsa
+      cp vars.example vars
+      
+      # Инициализация в batch-режиме
+      ./easyrsa --batch init-pki
+      ./easyrsa --batch build-ca nopass <<< $'yes\n'
+      ./easyrsa --batch build-server-full tun-server nopass <<< $'yes\n'
+      ./easyrsa --batch gen-dh
+      openvpn --genkey secret ta.key
+      
+      # Конфигурация сервера TUN (ВАЖНО: файл должен быть в /etc/openvpn/server/)
+      mkdir -p /etc/openvpn/server
+      cat > /etc/openvpn/server/tun-server.conf << 'EOF'
+port 1194
+proto udp
+dev tun
+ca /etc/openvpn/easy-rsa/pki/ca.crt
+cert /etc/openvpn/easy-rsa/pki/issued/tun-server.crt
+key /etc/openvpn/easy-rsa/pki/private/tun-server.key
+dh /etc/openvpn/easy-rsa/pki/dh.pem
+tls-auth /etc/openvpn/easy-rsa/ta.key 0
+topology subnet
+server 10.10.1.0 255.255.255.0
+ifconfig-pool-persist ipp.txt
+keepalive 10 120
+cipher AES-256-CBC
+user nobody
+group nogroup
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+explicit-exit-notify 1
+EOF
+      
+      # Установка прав
+      chmod 600 /etc/openvpn/easy-rsa/pki/private/*
+      chmod 644 /etc/openvpn/easy-rsa/pki/ca.crt
+      chmod 644 /etc/openvpn/easy-rsa/pki/issued/*
+      chmod 600 /etc/openvpn/easy-rsa/ta.key
+      
+      # ВАЖНО: в Ubuntu 24.04 используется openvpn-server@имя (не openvpn@server/имя)
+      # Выходим из каталога перед запуском systemctl
+      cd /
+      systemctl enable --now openvpn-server@tun-server
+      
+      # Запуск iperf3 сервера
+      cat > /etc/systemd/system/iperf3-server.service << 'IPERF'
+[Unit]
+Description=iPerf3 Server
+After=network.target openvpn-server@tun-server.service
+
+[Service]
+ExecStartPre=/bin/sleep 15
+ExecStart=/usr/bin/iperf3 -s -B 10.10.1.1
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+IPERF
+      systemctl daemon-reload
+      systemctl enable --now iperf3-server.service
+    SHELL
+  end
+
+  # ======================
+  # tun-client: Клиент для TUN (упрощённая версия с копированием сертификатов)
+  # ======================
+  config.vm.define "tun-client" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "tun-client"
+    node.vm.network "private_network", ip: "192.168.100.11", netmask: "255.255.255.0"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 256
+      vb.cpus = 1
+    end
+
+    node.vm.provision "shell", inline: $base_setup + <<-SHELL
+      apt-get install -y openvpn
+      
+      # Генерация клиентских сертификатов (для учебных целей — тот же CA)
+      mkdir -p /etc/openvpn/easy-rsa-client/pki
+      cp -r /usr/share/easy-rsa/* /etc/openvpn/easy-rsa-client/
+      cd /etc/openvpn/easy-rsa-client
+      cp vars.example vars
+      ./easyrsa --batch init-pki
+      ./easyrsa --batch build-ca nopass <<< $'yes\n'
+      ./easyrsa --batch build-client-full tun-client nopass <<< $'yes\n'
+      openvpn --genkey secret ta.key
+      
+      # Конфигурация клиента
+      mkdir -p /etc/openvpn/client
+      cat > /etc/openvpn/client/tun-client.conf << 'EOF'
+client
+dev tun
+proto udp
+remote 192.168.100.10 1194
+resolv-retry infinite
+nobind
+user nobody
+group nogroup
+persist-key
+persist-tun
+remote-cert-tls server
+cipher AES-256-CBC
+verb 3
+key-direction 1
+<ca>
+EOF
+      cat /etc/openvpn/easy-rsa-client/pki/ca.crt >> /etc/openvpn/client/tun-client.conf
+      echo "</ca>" >> /etc/openvpn/client/tun-client.conf
+      echo "<cert>" >> /etc/openvpn/client/tun-client.conf
+      cat /etc/openvpn/easy-rsa-client/pki/issued/tun-client.crt >> /etc/openvpn/client/tun-client.conf
+      echo "</cert>" >> /etc/openvpn/client/tun-client.conf
+      echo "<key>" >> /etc/openvpn/client/tun-client.conf
+      cat /etc/openvpn/easy-rsa-client/pki/private/tun-client.key >> /etc/openvpn/client/tun-client.conf
+      echo "</key>" >> /etc/openvpn/client/tun-client.conf
+      echo "<tls-auth>" >> /etc/openvpn/client/tun-client.conf
+      cat /etc/openvpn/easy-rsa-client/ta.key >> /etc/openvpn/client/tun-client.conf
+      echo "</tls-auth>" >> /etc/openvpn/client/tun-client.conf
+      
+      # Скрипт замера скорости
+      cat > /home/vagrant/test-tun-speed.sh << 'SCRIPT'
+#!/bin/bash
+echo "=================================="
+echo "Замер скорости через TUN-туннель"
+echo "=================================="
+timeout 30 openvpn --config /etc/openvpn/client/tun-client.conf --daemon --log /tmp/openvpn.log
+sleep 10
+if ip addr show tun0 2>/dev/null | grep -q "10.10.1."; then
+  echo "TUN-интерфейс активен"
+  iperf3 -c 10.10.1.1 -t 10 -R
+  pkill openvpn
+else
+  echo "TUN-интерфейс не поднялся"
+  cat /tmp/openvpn.log
+  exit 1
+fi
+SCRIPT
+      chmod +x /home/vagrant/test-tun-speed.sh
+      chown vagrant:vagrant /home/vagrant/test-tun-speed.sh
+    SHELL
+  end
+
+  # ======================
+  # tap-server: OpenVPN сервер в режиме TAP
+  # ======================
+  config.vm.define "tap-server" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "tap-server"
+    node.vm.network "private_network", ip: "192.168.100.20", netmask: "255.255.255.0"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+    end
+
+    node.vm.provision "shell", inline: $openvpn_pki_setup + <<-SHELL
+      # PKI для TAP
+      mkdir -p /etc/openvpn/easy-rsa-tap/pki
+      cp -r /usr/share/easy-rsa/* /etc/openvpn/easy-rsa-tap/
+      cd /etc/openvpn/easy-rsa-tap
+      cp vars.example vars
+      
+      ./easyrsa --batch init-pki
+      ./easyrsa --batch build-ca nopass <<< $'yes\n'
+      ./easyrsa --batch build-server-full tap-server nopass <<< $'yes\n'
+      ./easyrsa --batch gen-dh
+      openvpn --genkey secret ta.key
+      
+      # Конфигурация сервера TAP
+      mkdir -p /etc/openvpn/server
+      cat > /etc/openvpn/server/tap-server.conf << 'EOF'
+port 1195
+proto udp
+dev tap
+ca /etc/openvpn/easy-rsa-tap/pki/ca.crt
+cert /etc/openvpn/easy-rsa-tap/pki/issued/tap-server.crt
+key /etc/openvpn/easy-rsa-tap/pki/private/tap-server.key
+dh /etc/openvpn/easy-rsa-tap/pki/dh.pem
+tls-auth /etc/openvpn/easy-rsa-tap/ta.key 0
+server-bridge 192.168.101.1 255.255.255.0 192.168.101.100 192.168.101.200
+push "route 192.168.100.0 255.255.255.0"
+keepalive 10 120
+cipher AES-256-CBC
+user nobody
+group nogroup
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+explicit-exit-notify 1
+EOF
+      
+      chmod 600 /etc/openvpn/easy-rsa-tap/pki/private/*
+      chmod 644 /etc/openvpn/easy-rsa-tap/pki/ca.crt
+      chmod 644 /etc/openvpn/easy-rsa-tap/pki/issued/*
+      chmod 600 /etc/openvpn/easy-rsa-tap/ta.key
+      
+      cd /
+      systemctl enable --now openvpn-server@tap-server
+      
+      # Запуск iperf3 на TAP-сети
+      cat > /etc/systemd/system/iperf3-tap.service << 'IPERF'
+[Unit]
+Description=iPerf3 Server for TAP
+After=network.target openvpn-server@tap-server.service
+
+[Service]
+ExecStartPre=/bin/sleep 20
+ExecStart=/usr/bin/iperf3 -s -B 192.168.101.1
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+IPERF
+      systemctl daemon-reload
+      systemctl enable --now iperf3-tap.service
+    SHELL
+  end
+
+  # ======================
+  # tap-client: Клиент для TAP
+  # ======================
+  config.vm.define "tap-client" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "tap-client"
+    node.vm.network "private_network", ip: "192.168.100.21", netmask: "255.255.255.0"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 256
+      vb.cpus = 1
+    end
+
+    node.vm.provision "shell", inline: $base_setup + <<-SHELL
+      apt-get install -y openvpn
+      
+      mkdir -p /etc/openvpn/easy-rsa-client/pki
+      cp -r /usr/share/easy-rsa/* /etc/openvpn/easy-rsa-client/
+      cd /etc/openvpn/easy-rsa-client
+      cp vars.example vars
+      ./easyrsa --batch init-pki
+      ./easyrsa --batch build-ca nopass <<< $'yes\n'
+      ./easyrsa --batch build-client-full tap-client nopass <<< $'yes\n'
+      openvpn --genkey secret ta.key
+      
+      mkdir -p /etc/openvpn/client
+      cat > /etc/openvpn/client/tap-client.conf << 'EOF'
+client
+dev tap
+proto udp
+remote 192.168.100.20 1195
+resolv-retry infinite
+nobind
+user nobody
+group nogroup
+persist-key
+persist-tun
+remote-cert-tls server
+cipher AES-256-CBC
+verb 3
+key-direction 1
+<ca>
+EOF
+      cat /etc/openvpn/easy-rsa-client/pki/ca.crt >> /etc/openvpn/client/tap-client.conf
+      echo "</ca>" >> /etc/openvpn/client/tap-client.conf
+      echo "<cert>" >> /etc/openvpn/client/tap-client.conf
+      cat /etc/openvpn/easy-rsa-client/pki/issued/tap-client.crt >> /etc/openvpn/client/tap-client.conf
+      echo "</cert>" >> /etc/openvpn/client/tap-client.conf
+      echo "<key>" >> /etc/openvpn/client/tap-client.conf
+      cat /etc/openvpn/easy-rsa-client/pki/private/tap-client.key >> /etc/openvpn/client/tap-client.conf
+      echo "</key>" >> /etc/openvpn/client/tap-client.conf
+      echo "<tls-auth>" >> /etc/openvpn/client/tap-client.conf
+      cat /etc/openvpn/easy-rsa-client/ta.key >> /etc/openvpn/client/tap-client.conf
+      echo "</tls-auth>" >> /etc/openvpn/client/tap-client.conf
+      
+      cat > /home/vagrant/test-tap-speed.sh << 'SCRIPT'
+#!/bin/bash
+echo "=================================="
+echo "Замер скорости через TAP-туннель"
+echo "=================================="
+timeout 30 openvpn --config /etc/openvpn/client/tap-client.conf --daemon --log /tmp/openvpn.log
+sleep 15
+if ip addr show tap0 2>/dev/null | grep -q "192.168.101."; then
+  echo "TAP-интерфейс активен"
+  iperf3 -c 192.168.101.1 -t 10 -R
+  pkill openvpn
+else
+  echo "TAP-интерфейс не поднялся"
+  cat /tmp/openvpn.log
+  exit 1
+fi
+SCRIPT
+      chmod +x /home/vagrant/test-tap-speed.sh
+      chown vagrant:vagrant /home/vagrant/test-tap-speed.sh
+    SHELL
+  end
+
+  # ======================
+  # openvpn-ras: RAS-сервер для подключения с хоста Windows
+  # ======================
+  config.vm.define "openvpn-ras" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "openvpn-ras"
+    node.vm.network "private_network", ip: "192.168.100.30", netmask: "255.255.255.0"
+    node.vm.network "forwarded_port", guest: 1194, host: 1194, protocol: "udp"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+    end
+
+    node.vm.provision "shell", inline: $openvpn_pki_setup + <<-SHELL
+      # Полная PKI для RAS
+      mkdir -p /etc/openvpn/easy-rsa-ras/pki
+      cp -r /usr/share/easy-rsa/* /etc/openvpn/easy-rsa-ras/
+      cd /etc/openvpn/easy-rsa-ras
+      cp vars.example vars
+      
+      ./easyrsa --batch init-pki
+      ./easyrsa --batch build-ca nopass <<< $'yes\n'
+      ./easyrsa --batch build-server-full ras-server nopass <<< $'yes\n'
+      ./easyrsa --batch build-client-full windows-client nopass <<< $'yes\n'
+      ./easyrsa --batch gen-dh
+      openvpn --genkey secret ta.key
+      
+      # Конфигурация RAS-сервера
+      mkdir -p /etc/openvpn/server
+      cat > /etc/openvpn/server/ras-server.conf << 'EOF'
+port 1194
+proto udp
+dev tun
+ca /etc/openvpn/easy-rsa-ras/pki/ca.crt
+cert /etc/openvpn/easy-rsa-ras/pki/issued/ras-server.crt
+key /etc/openvpn/easy-rsa-ras/pki/private/ras-server.key
+dh /etc/openvpn/easy-rsa-ras/pki/dh.pem
+tls-auth /etc/openvpn/easy-rsa-ras/ta.key 0
+topology subnet
+server 10.8.0.0 255.255.255.0
+ifconfig-pool-persist ipp.txt
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 8.8.8.8"
+push "dhcp-option DNS 8.8.4.4"
+keepalive 10 120
+cipher AES-256-CBC
+user nobody
+group nogroup
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+explicit-exit-notify 1
+EOF
+      
+      chmod 600 /etc/openvpn/easy-rsa-ras/pki/private/*
+      chmod 644 /etc/openvpn/easy-rsa-ras/pki/ca.crt
+      chmod 644 /etc/openvpn/easy-rsa-ras/pki/issued/*
+      chmod 600 /etc/openvpn/easy-rsa-ras/ta.key
+      
+      cd /
+      systemctl enable --now openvpn-server@ras-server
+      
+      # Создание клиентского конфига для Windows
+      cat > /home/vagrant/windows-client.ovpn << 'OVPN'
+client
+dev tun
+proto udp
+remote 127.0.0.1 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+cipher AES-256-CBC
+verb 3
+<ca>
+OVPN
+      
+      cat /etc/openvpn/easy-rsa-ras/pki/ca.crt >> /home/vagrant/windows-client.ovpn
+      echo "</ca>" >> /home/vagrant/windows-client.ovpn
+      echo "<cert>" >> /home/vagrant/windows-client.ovpn
+      cat /etc/openvpn/easy-rsa-ras/pki/issued/windows-client.crt >> /home/vagrant/windows-client.ovpn
+      echo "</cert>" >> /home/vagrant/windows-client.ovpn
+      echo "<key>" >> /home/vagrant/windows-client.ovpn
+      cat /etc/openvpn/easy-rsa-ras/pki/private/windows-client.key >> /home/vagrant/windows-client.ovpn
+      echo "</key>" >> /home/vagrant/windows-client.ovpn
+      echo "<tls-auth>" >> /home/vagrant/windows-client.ovpn
+      cat /etc/openvpn/easy-rsa-ras/ta.key >> /home/vagrant/windows-client.ovpn
+      echo "</tls-auth>" >> /home/vagrant/windows-client.ovpn
+      
+      chown vagrant:vagrant /home/vagrant/windows-client.ovpn
+      echo "=========================================="
+      echo "RAS-сервер готов к подключению!"
+      echo "Файл для клиента: /home/vagrant/windows-client.ovpn"
+      echo "Скопируйте его на хост: "
+      echo "vagrant ssh openvpn-ras -c 'cat /home/vagrant/windows-client.ovpn' > windows-client.ovpn"
+      echo "=========================================="
+    SHELL
+  end
+end
