@@ -1,0 +1,273 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.ssh.username = "vagrant"
+  config.ssh.forward_agent = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.boot_timeout = 600
+
+  # Базовая настройка ОС для всех машин
+  $base_setup = <<-'SHELL'
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # Установка необходимых пакетов
+    apt-get update
+    apt-get install -y vlan ifenslave net-tools iproute2 bridge-utils
+    
+    # Загрузка модулей ядра
+    modprobe 8021q
+    modprobe bonding
+    echo "8021q" >> /etc/modules
+    echo "bonding" >> /etc/modules
+  SHELL
+
+  # ======================
+  # testClient1 (VLAN 10)
+  # ======================
+  config.vm.define "testClient1" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "testClient1"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+      vb.customize ["modifyvm", :id, "--nic1", "nat"]
+      vb.customize ["modifyvm", :id, "--nic2", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet2", "testLAN"]
+    end
+
+    node.vm.provision "shell", inline: $base_setup + <<-SHELL
+      cat > /etc/netplan/01-vlan.yaml << 'NETPLAN'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: true
+    enp0s8:
+      dhcp4: no
+  vlans:
+    vlan10:
+      id: 10
+      link: enp0s8
+      addresses: [10.10.10.254/24]
+NETPLAN
+      chmod 600 /etc/netplan/01-vlan.yaml
+      netplan apply
+      sleep 3
+      ip addr show vlan10 || true
+    SHELL
+  end
+
+  # ======================
+  # testClient2 (VLAN 20)
+  # ======================
+  config.vm.define "testClient2" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "testClient2"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+      vb.customize ["modifyvm", :id, "--nic1", "nat"]
+      vb.customize ["modifyvm", :id, "--nic2", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet2", "testLAN"]
+    end
+
+    node.vm.provision "shell", inline: $base_setup + <<-SHELL
+      cat > /etc/netplan/01-vlan.yaml << 'NETPLAN'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: true
+    enp0s8:
+      dhcp4: no
+  vlans:
+    vlan20:
+      id: 20
+      link: enp0s8
+      addresses: [10.10.10.254/24]
+NETPLAN
+      chmod 600 /etc/netplan/01-vlan.yaml
+      netplan apply
+      sleep 3
+      ip addr show vlan20 || true
+    SHELL
+  end
+
+  # ======================
+  # testServer1 (VLAN 10)
+  # ======================
+  config.vm.define "testServer1" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "testServer1"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+      vb.customize ["modifyvm", :id, "--nic1", "nat"]
+      vb.customize ["modifyvm", :id, "--nic2", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet2", "testLAN"]
+    end
+
+    node.vm.provision "shell", inline: $base_setup + <<-SHELL
+      cat > /etc/netplan/01-vlan.yaml << 'NETPLAN'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: true
+    enp0s8:
+      dhcp4: no
+  vlans:
+    vlan10:
+      id: 10
+      link: enp0s8
+      addresses: [10.10.10.1/24]
+NETPLAN
+      chmod 600 /etc/netplan/01-vlan.yaml
+      netplan apply
+      sleep 3
+      ip addr show vlan10 || true
+    SHELL
+  end
+
+  # ======================
+  # testServer2 (VLAN 20)
+  # ======================
+  config.vm.define "testServer2" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "testServer2"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+      vb.customize ["modifyvm", :id, "--nic1", "nat"]
+      vb.customize ["modifyvm", :id, "--nic2", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet2", "testLAN"]
+    end
+
+    node.vm.provision "shell", inline: $base_setup + <<-SHELL
+      cat > /etc/netplan/01-vlan.yaml << 'NETPLAN'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: true
+    enp0s8:
+      dhcp4: no
+  vlans:
+    vlan20:
+      id: 20
+      link: enp0s8
+      addresses: [10.10.10.1/24]
+NETPLAN
+      chmod 600 /etc/netplan/01-vlan.yaml
+      netplan apply
+      sleep 3
+      ip addr show vlan20 || true
+    SHELL
+  end
+
+  # ======================
+  # centralRouter (bond — ДВЕ разные сети!)
+  # ======================
+  config.vm.define "centralRouter" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "centralRouter"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+      vb.customize ["modifyvm", :id, "--nic1", "nat"]
+      vb.customize ["modifyvm", :id, "--nic2", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet2", "bondLAN1"]
+      vb.customize ["modifyvm", :id, "--nic3", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet3", "bondLAN2"]
+    end
+
+    node.vm.provision "shell", inline: $base_setup + <<-SHELL
+      cat > /etc/netplan/01-bond.yaml << 'NETPLAN'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: true
+    enp0s8:
+      dhcp4: no
+    enp0s9:
+      dhcp4: no
+  bonds:
+    bond0:
+      interfaces: [enp0s8, enp0s9]
+      addresses: [192.168.200.1/24]
+      parameters:
+        mode: active-backup
+        primary: enp0s8
+        mii-monitor-interval: 100
+NETPLAN
+      chmod 600 /etc/netplan/01-bond.yaml
+      netplan apply
+      sleep 5
+      echo "=== Bond status ==="
+      cat /proc/net/bonding/bond0 || true
+      echo "=== IP addresses ==="
+      ip addr show bond0 || true
+    SHELL
+  end
+
+  # ======================
+  # inetRouter (bond — ДВЕ разные сети!)
+  # ======================
+  config.vm.define "inetRouter" do |node|
+    node.vm.box = "ubuntu24-gold"
+    node.vm.hostname = "inetRouter"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.memory = 512
+      vb.cpus = 1
+      vb.customize ["modifyvm", :id, "--nic1", "nat"]
+      vb.customize ["modifyvm", :id, "--nic2", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet2", "bondLAN1"]
+      vb.customize ["modifyvm", :id, "--nic3", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet3", "bondLAN2"]
+    end
+
+    node.vm.provision "shell", inline: $base_setup + <<-SHELL
+      cat > /etc/netplan/01-bond.yaml << 'NETPLAN'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: true
+    enp0s8:
+      dhcp4: no
+    enp0s9:
+      dhcp4: no
+  bonds:
+    bond0:
+      interfaces: [enp0s8, enp0s9]
+      addresses: [192.168.200.2/24]
+      parameters:
+        mode: active-backup
+        primary: enp0s8
+        mii-monitor-interval: 100
+NETPLAN
+      chmod 600 /etc/netplan/01-bond.yaml
+      netplan apply
+      sleep 5
+      echo "=== Bond status ==="
+      cat /proc/net/bonding/bond0 || true
+      echo "=== IP addresses ==="
+      ip addr show bond0 || true
+    SHELL
+  end
+end
