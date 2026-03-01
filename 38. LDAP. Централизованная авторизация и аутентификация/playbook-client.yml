@@ -1,0 +1,105 @@
+---
+- name: Configure FreeIPA Client on CentOS/Rocky Linux
+  hosts: all
+  connection: local
+  become: yes
+  vars:
+    ipa_server: "ipa.example.com"
+    ipa_domain: "example.com"
+    ipa_realm: "EXAMPLE.COM"
+    admin_password: "Vagrant123!"
+
+  tasks:
+    - name: Enable IDM module (optional, may fail)
+      command: dnf module enable -y idm:DL1
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Install required packages
+      dnf:
+        name:
+          - epel-release
+          - freeipa-client
+          - sssd
+          - sssd-tools
+          - oddjob
+          - oddjob-mkhomedir
+          - krb5-workstation
+        state: present
+        update_cache: yes
+
+    - name: Ensure /etc/hosts has IPA server entry
+      lineinfile:
+        path: /etc/hosts
+        line: "192.168.50.10 ipa.example.com ipa"
+        create: yes
+
+    - name: Join IPA domain
+      command: >
+        ipa-client-install
+        --hostname={{ ansible_hostname }}
+        --mkhomedir
+        --server={{ ipa_server }}
+        --domain={{ ipa_domain }}
+        --realm={{ ipa_realm }}
+        --admin-password={{ admin_password }}
+        --password={{ admin_password }}
+        --unattended
+        --force-join
+      args:
+        creates: /etc/ipa/default.conf
+      register: ipa_join
+      failed_when: ipa_join.rc != 0 and "already enrolled" not in ipa_join.stderr
+
+    - name: Fix SSSD permissions
+      file:
+        path: /etc/sssd/sssd.conf
+        mode: '0600'
+        owner: root
+        group: root
+      when: ipa_join.changed or ipa_join.rc == 0
+
+    - name: Enable and start SSSD and oddjobd
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - sssd
+        - oddjobd
+
+    - name: Configure SSHD for IPA SSH keys (Доп. задание 3)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^#?AuthorizedKeysCommand', line: 'AuthorizedKeysCommand /usr/bin/sss_ssh_authorizedkeys' }
+        - { regexp: '^#?AuthorizedKeysCommandUser', line: 'AuthorizedKeysCommandUser nobody' }
+      notify: restart sshd
+
+    - name: Configure firewalld (Доп. задание 4)
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - ssh
+        - kerberos
+        - ldap
+        - ldaps
+        - kpasswd
+      notify: reload firewalld
+
+  handlers:
+    - name: restart sshd
+      systemd:
+        name: sshd
+        state: restarted
+
+    - name: reload firewalld
+      systemd:
+        name: firewalld
+        state: reloaded

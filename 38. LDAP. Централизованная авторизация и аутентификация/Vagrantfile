@@ -1,0 +1,114 @@
+# -*- mode: ruby -*-
+# vim: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.ssh.username = "vagrant"
+  config.ssh.forward_agent = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.boot_timeout = 1200
+
+  # Базовая подготовка ОС - без dnf update
+  $base_setup = <<-'SHELL'
+    set -eux
+    dnf install -y epel-release dnf-plugins-core
+    dnf config-manager --set-enabled crb
+    dnf install -y curl wget vim net-tools iproute firewalld
+    systemctl enable firewalld --now
+    timedatectl set-timezone UTC
+  SHELL
+
+  # Сервер FreeIPA
+  config.vm.define "freeipa-server" do |node|
+    node.vm.box = "almalinux/9"
+    node.vm.hostname = "ipa.example.com"
+
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "freeipa-server"
+      vb.memory = 3072
+      vb.cpus = 2
+      vb.customize ["modifyvm", :id, "--nic1", "nat"]
+      vb.customize ["modifyvm", :id, "--nic2", "intnet"]
+      vb.customize ["modifyvm", :id, "--intnet2", "freeipaLAN"]
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+    end
+
+    node.vm.network "private_network", ip: "192.168.50.10",
+                    virtualbox__intnet: "freeipaLAN"
+
+    # Базовая настройка
+    node.vm.provision "shell", inline: $base_setup, privileged: true
+
+    # Установка и настройка FreeIPA сервера
+    node.vm.provision "shell",
+                      path: "freeipa-server.sh",
+                      privileged: true,
+                      env: {
+                        "IPA_DOMAIN" => "example.com",
+                        "IPA_REALM" => "EXAMPLE.COM",
+                        "ADMIN_PASSWORD" => "Vagrant123!",
+                        "DS_PASSWORD" => "Vagrant123!",
+                        "SERVER_IP" => "192.168.50.10"
+                      }
+  end
+
+	# Клиент FreeIPA
+	config.vm.define "freeipa-client" do |node|
+	  node.vm.box = "almalinux/9"
+	  node.vm.hostname = "client.example.com"
+	  # Включаем синхронизацию текущей папки в /vagrant на клиенте (для Ansible playbook)
+	  node.vm.synced_folder ".", "/vagrant"
+
+	  node.vm.provider "virtualbox" do |vb|
+		vb.name = "freeipa-client"
+		vb.memory = 2048
+		vb.cpus = 1
+		vb.customize ["modifyvm", :id, "--nic1", "nat"]
+		vb.customize ["modifyvm", :id, "--nic2", "intnet"]
+		vb.customize ["modifyvm", :id, "--intnet2", "freeipaLAN"]
+	  end
+
+	  node.vm.network "private_network", ip: "192.168.50.11",
+					  virtualbox__intnet: "freeipaLAN"
+
+	  # Настройка сети и hosts
+	  node.vm.provision "shell", inline: $base_setup + <<-'SHELL'
+		# Определяем имя второго интерфейса (не lo)
+		SECOND_IF=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | tail -1)
+		
+		# Находим имя соединения NetworkManager, связанное с этим интерфейсом
+		CONN_NAME=$(nmcli -t -f NAME,DEVICE con show | grep ":$SECOND_IF$" | cut -d: -f1 | head -1)
+		if [ -n "$CONN_NAME" ]; then
+			nmcli con mod "$CONN_NAME" ipv4.dns 192.168.50.10
+			nmcli con up "$CONN_NAME"
+			echo "DNS for $SECOND_IF set via NetworkManager"
+		else
+			echo "Warning: No connection found for $SECOND_IF, skipping DNS configuration."
+		fi
+
+		# Настройка /etc/hosts
+		cat > /etc/hosts <<'EOF_HOSTS'
+	127.0.0.1 localhost
+	192.168.50.10 ipa.example.com ipa
+	192.168.50.11 client.example.com client
+	EOF_HOSTS
+
+		hostnamectl set-hostname client.example.com
+	  SHELL
+
+	  # Ansible provisioning для клиента
+	  node.vm.provision "ansible_local" do |ansible|
+		ansible.playbook = "playbook-client.yml"
+		ansible.verbose = "v"
+		ansible.install = true
+		ansible.version = "latest"
+		ansible.limit = "all"  # явно указываем все хосты
+		ansible.extra_vars = {
+		  ipa_server: "ipa.example.com",
+		  ipa_domain: "example.com",
+		  ipa_realm: "EXAMPLE.COM",
+		  admin_password: "Vagrant123!"
+		}
+	  end
+	end
+end
