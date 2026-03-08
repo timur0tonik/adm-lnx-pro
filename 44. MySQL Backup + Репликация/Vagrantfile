@@ -1,0 +1,83 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu24-gold"
+  config.vm.synced_folder ".", "/vagrant", type: "virtualbox"
+
+  # Мастер
+  config.vm.define "master" do |master|
+    master.vm.hostname = "master"
+    master.vm.network "private_network", ip: "192.168.11.150"
+
+    master.vm.provider "virtualbox" do |vb|
+      vb.name = "MySQL_Master_Ubuntu"
+      vb.memory = "1024"
+      vb.cpus = 1
+    end
+
+    # Shell-провижинер: swap + установка Ansible (Ubuntu)
+    master.vm.provision "shell", inline: <<-SHELL
+      # Swap-файл 1ГБ
+      dd if=/dev/zero of=/swapfile bs=1M count=1024
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+      apt update
+      apt install -y ansible
+    SHELL
+
+    # Ansible-local провижинер
+    master.vm.provision "ansible_local" do |ansible|
+      ansible.verbose = "vvv"
+      ansible.playbook = "provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.compatibility_mode = "2.0"
+      ansible.extra_vars = {
+        server_id: 1,
+        mysql_role: "master",
+        master_ip: "192.168.11.150",
+        slave_ip: "192.168.11.151"
+      }
+    end
+  end
+
+  # Слейв
+  config.vm.define "slave" do |slave|
+    slave.vm.hostname = "slave"
+    slave.vm.network "private_network", ip: "192.168.11.151"
+
+    slave.vm.provider "virtualbox" do |vb|
+      vb.name = "MySQL_Slave_Ubuntu"
+      vb.memory = "1024"
+      vb.cpus = 1
+    end
+
+    slave.vm.provision "shell", inline: <<-SHELL
+      dd if=/dev/zero of=/swapfile bs=1M count=1024
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      apt update
+      apt install -y ansible
+    SHELL
+
+    slave.vm.provision "ansible_local" do |ansible|
+      ansible.verbose = "vvv"
+      ansible.playbook = "provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.compatibility_mode = "2.0"
+      ansible.extra_vars = {
+        server_id: 2,
+        mysql_role: "slave",
+        master_ip: "192.168.11.150",
+        slave_ip: "192.168.11.151"
+      }
+    end
+  end
+end

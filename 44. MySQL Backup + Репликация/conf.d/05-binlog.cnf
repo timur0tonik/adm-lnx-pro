@@ -1,0 +1,6 @@
+[mysqld]
+log-bin = mysql-bin
+binlog-format = ROW
+expire_logs_days = 7
+# replicate-ignore-table = bet.events_on_demand
+# replicate-ignore-table = bet.v_same_event

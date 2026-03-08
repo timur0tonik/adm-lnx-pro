@@ -1,0 +1,257 @@
+---
+- hosts: all
+  gather_facts: yes
+  become: yes
+
+  vars:
+    mysql_root_password: "OtusLinux2024!"
+
+  tasks:
+    - name: Установка зависимостей (python3-pymysql, python3-mysqldb)
+      apt:
+        name:
+          - python3-pymysql
+          - python3-mysqldb
+        state: present
+        update_cache: yes
+
+    - name: Установка debconf-utils
+      apt:
+        name: debconf-utils
+        state: present
+
+    - name: Установка MySQL Server 8.0
+      apt:
+        name: mysql-server-8.0
+        state: present
+      notify: restart mysql
+
+    - name: Установка коллекции community.mysql
+      command: ansible-galaxy collection install community.mysql
+      args:
+        creates: /home/vagrant/.ansible/collections/ansible_collections/community/mysql
+      become: no
+
+    # ---- Конфигурация MySQL ----
+    - name: Удаление или закомментирование bind-address из основного конфига
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: '^bind-address'
+        line: '#bind-address = 127.0.0.1'
+        state: present
+
+    - name: Создание директории для дополнительных конфигов
+      file:
+        path: /etc/mysql/conf.d
+        state: directory
+
+    - name: Копирование конфигурационных файлов
+      copy:
+        src: "/vagrant/conf.d/{{ item }}"
+        dest: "/etc/mysql/conf.d/{{ item }}"
+        remote_src: yes
+      loop:
+        - 01-basics.cnf
+        - 05-binlog.cnf
+
+    - name: Установка server-id в 01-basics.cnf
+      lineinfile:
+        path: /etc/mysql/conf.d/01-basics.cnf
+        regexp: '^#?server-id\s*='
+        line: "server-id = {{ server_id }}"
+        insertafter: '^\[mysqld\]'
+
+    - name: Включение GTID в 01-basics.cnf
+      lineinfile:
+        path: /etc/mysql/conf.d/01-basics.cnf
+        regexp: '^gtid_mode'
+        line: "gtid_mode = ON"
+        insertafter: '^\[mysqld\]'
+
+    - name: Включение enforce_gtid_consistency в 01-basics.cnf
+      lineinfile:
+        path: /etc/mysql/conf.d/01-basics.cnf
+        regexp: '^enforce_gtid_consistency'
+        line: "enforce_gtid_consistency = ON"
+        insertafter: '^\[mysqld\]'
+
+    - name: Перезапуск MySQL для применения конфигурации
+      systemd:
+        name: mysql
+        state: restarted
+      notify: restart mysql
+
+    - name: Ждём, пока MySQL полностью запустится
+      wait_for:
+        port: 3306
+        host: 127.0.0.1
+        timeout: 60
+        delay: 5
+
+    - name: Установка пароля для root
+      mysql_user:
+        name: root
+        host: localhost
+        password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        state: present
+
+    # ---- Блок для мастера ----
+    - name: Задачи для мастера
+      when: mysql_role == "master"
+      block:
+        - name: Создание базы bet
+          mysql_db:
+            name: bet
+            state: present
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+
+        - name: Импорт дампа bet.dmp
+          mysql_db:
+            name: bet
+            state: import
+            target: /vagrant/bet.dmp
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+
+        - name: Удаление таблицы events_on_demand (если существует)
+          mysql_query:
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            query: "DROP TABLE IF EXISTS bet.events_on_demand"
+
+        - name: Удаление таблицы v_same_event (если существует)
+          mysql_query:
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            query: "DROP TABLE IF EXISTS bet.v_same_event"
+
+        - name: Удаление представления v_same_event (если существует)
+          mysql_query:
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            query: "DROP VIEW IF EXISTS bet.v_same_event"
+
+        - name: Проверка, что таблицы удалены из базы bet
+          mysql_query:
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            query: "SHOW TABLES FROM bet"
+          register: tables_check
+          failed_when: "'v_same_event' in tables_check.query_result[0] or 'events_on_demand' in tables_check.query_result[0]"
+
+        - name: Создание пользователя repl для репликации
+          mysql_user:
+            name: repl
+            host: '%'
+            password: '!OtusLinux2018'
+            priv: '*.*:REPLICATION SLAVE'
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+
+        - name: Создание дампа master.sql (игнорируем ненужные таблицы)
+          shell: |
+            mysqldump -uroot -p'{{ mysql_root_password }}' \
+              --all-databases --triggers --routines --master-data \
+              --ignore-table=bet.events_on_demand \
+              --ignore-table=bet.v_same_event > /vagrant/master.sql
+          args:
+            executable: /bin/bash
+          become: yes
+
+        - name: Ожидание применения конфигурации
+          wait_for:
+            port: 3306
+            host: "{{ master_ip }}"
+            timeout: 30
+            delay: 5
+
+    # ---- Блок для слейва ----
+    - name: Задачи для слейва
+      when: mysql_role == "slave"
+      block:
+        - name: Ожидание появления master.sql (максимум 120 секунд)
+          wait_for:
+            path: /vagrant/master.sql
+            timeout: 120
+
+        - name: Импорт master.sql
+          mysql_db:
+            name: all
+            state: import
+            target: /vagrant/master.sql
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+
+        - name: Раскомментирование и настройка replicate-ignore-table в 05-binlog.cnf
+          blockinfile:
+            path: /etc/mysql/conf.d/05-binlog.cnf
+            marker: "# {mark} ANSIBLE MANAGED BLOCK"
+            block: |
+              replicate-ignore-table = bet.events_on_demand
+              replicate-ignore-table = bet.v_same_event
+            insertafter: '^\[mysqld\]'
+            state: present
+
+        - name: Перезапуск MySQL для применения конфига слейва
+          systemd:
+            name: mysql
+            state: restarted
+
+        - name: Ожидание запуска MySQL после перезапуска
+          wait_for:
+            port: 3306
+            host: 127.0.0.1
+            timeout: 60
+            delay: 5
+
+        - name: Ожидание доступности мастера (максимум 60 секунд)
+          wait_for:
+            host: "{{ master_ip }}"
+            port: 3306
+            timeout: 60
+            delay: 5
+          ignore_errors: yes
+
+        - name: Настройка репликации (CHANGE MASTER)
+          mysql_query:
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            query:
+              - STOP SLAVE;
+              - CHANGE MASTER TO MASTER_HOST='{{ master_ip }}', MASTER_PORT=3306, MASTER_USER='repl', MASTER_PASSWORD='!OtusLinux2018', MASTER_AUTO_POSITION=1;
+              - START SLAVE;
+
+        - name: Ожидание подключения к мастеру (максимум 30 секунд)
+          wait_for:
+            timeout: 30
+            delay: 3
+          failed_when: false
+          register: slave_wait
+
+        - name: Проверка статуса репликации
+          mysql_query:
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            query: "SHOW SLAVE STATUS"
+          register: slave_status
+          failed_when: >
+            "'Slave_IO_Running: Yes' not in slave_status.query_result[0][0] or
+            'Slave_SQL_Running: Yes' not in slave_status.query_result[0][0]"
+
+  handlers:
+    - name: restart mysql
+      systemd:
+        name: mysql
+        state: restarted
