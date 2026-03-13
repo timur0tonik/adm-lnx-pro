@@ -1,0 +1,112 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu24-gold"
+  config.vm.synced_folder ".", "/vagrant", type: "virtualbox"
+  
+  # Master node (node1)
+  config.vm.define "node1" do |node|
+    node.vm.hostname = "node1"
+    node.vm.network "private_network", ip: "192.168.57.11"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "postgres-master"
+      vb.memory = 1024
+      vb.cpus = 2
+    end
+    
+    node.vm.provision "shell", inline: <<-SHELL
+      while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; do
+        echo "Waiting for unattended-upgrades to finish..."
+        sleep 5
+      done
+
+      dd if=/dev/zero of=/swapfile bs=1M count=1024
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+      apt update
+      apt install -y ansible python3-psycopg2 vim telnet wget curl
+    SHELL
+    
+    node.vm.provision "ansible_local" do |ansible|
+      ansible.playbook = "/vagrant/provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.limit = "node1"
+    end
+  end
+  
+  # Slave node (node2)
+  config.vm.define "node2" do |node|
+    node.vm.hostname = "node2"
+    node.vm.network "private_network", ip: "192.168.57.12"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "postgres-slave"
+      vb.memory = 1024
+      vb.cpus = 2
+    end
+    
+    node.vm.provision "shell", inline: <<-SHELL
+      while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; do
+        echo "Waiting for unattended-upgrades to finish..."
+        sleep 5
+      done
+
+      dd if=/dev/zero of=/swapfile bs=1M count=1024
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+      apt update
+      apt install -y ansible python3-psycopg2 vim telnet
+    SHELL
+    
+    node.vm.provision "ansible_local" do |ansible|
+      ansible.playbook = "/vagrant/provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.limit = "node2"
+    end
+  end
+  
+  # Barman backup server
+  config.vm.define "barman" do |node|
+    node.vm.hostname = "barman"
+    node.vm.network "private_network", ip: "192.168.57.13"
+    
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "barman-backup"
+      vb.memory = 1024
+      vb.cpus = 1
+    end
+    
+    node.vm.provision "shell", inline: <<-SHELL
+      while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; do
+        echo "Waiting for unattended-upgrades to finish..."
+        sleep 5
+      done
+
+      dd if=/dev/zero of=/swapfile bs=1M count=1024
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+      apt update
+      apt install -y ansible python3-psycopg2 vim telnet
+    SHELL
+    
+    node.vm.provision "ansible_local" do |ansible|
+      ansible.playbook = "/vagrant/provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.limit = "barman"
+    end
+  end
+end

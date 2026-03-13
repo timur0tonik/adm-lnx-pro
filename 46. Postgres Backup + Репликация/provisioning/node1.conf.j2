@@ -1,0 +1,12 @@
+[node1]
+description = "PostgreSQL Master Server Backup"
+ssh_command = ssh postgres@{{ master_ip }}
+conninfo = host={{ master_ip }} user=barman password={{ barman_password }} port=5432 dbname=postgres
+retention_policy_mode = auto
+retention_policy = RECOVERY WINDOW OF 7 days
+wal_retention_policy = main
+streaming_archiver = on
+slot_name = barman_slot
+streaming_conninfo = host={{ master_ip }} user=barman password={{ barman_password }} port=5432
+backup_method = postgres
+archiver = off

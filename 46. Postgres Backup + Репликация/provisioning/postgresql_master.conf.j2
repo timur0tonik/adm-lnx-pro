@@ -1,0 +1,14 @@
+listen_addresses = 'localhost,{{ master_ip }}'
+port = 5432
+max_connections = 100
+
+wal_level = replica
+max_wal_senders = 3
+max_replication_slots = 3
+hot_standby = on
+hot_standby_feedback = on
+
+max_wal_size = 1GB
+min_wal_size = 80MB
+
+password_encryption = scram-sha-256
