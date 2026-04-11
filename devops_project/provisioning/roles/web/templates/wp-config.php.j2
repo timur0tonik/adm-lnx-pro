@@ -1,0 +1,25 @@
+<?php
+define('DB_NAME', 'wordpress');
+define('DB_USER', 'wp_user');
+define('DB_PASSWORD', 'wp_pass_123');
+define('DB_HOST', '192.168.50.11');
+define('DB_CHARSET', 'utf8mb4');
+define('DB_COLLATE', '');
+
+// Принудительно включаем HTTPS, если запрос пришёл через прокси
+if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
+    $_SERVER['HTTPS'] = 'on';
+}
+$_SERVER['SERVER_PORT'] = '443';
+
+$table_prefix = 'wp_';
+define('WP_DEBUG', false);
+
+define('WP_HOME', 'https://localhost:8443');
+define('WP_SITEURL', 'https://localhost:8443');
+define('FORCE_SSL_ADMIN', true);
+
+if ( ! defined( 'ABSPATH' ) ) {
+    define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';

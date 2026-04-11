@@ -1,0 +1,74 @@
+---
+- name: Install Docker
+  apt:
+    name: docker.io
+    state: present
+    update_cache: yes
+
+# ===== Централизованный сбор логов (rsyslog) =====
+- name: Configure rsyslog to receive remote logs
+  lineinfile:
+    path: /etc/rsyslog.conf
+    regexp: '^#module\(load="imudp"\)'
+    line: 'module(load="imudp")'
+  notify: restart rsyslog
+
+- name: Enable UDP syslog reception on port 514
+  lineinfile:
+    path: /etc/rsyslog.conf
+    regexp: '^#input\(type="imudp" port="514"\)'
+    line: 'input(type="imudp" port="514")'
+  notify: restart rsyslog
+
+- name: Enable imtcp module in rsyslog
+  lineinfile:
+    path: /etc/rsyslog.conf
+    regexp: '^#module\(load="imtcp"\)'
+    line: 'module(load="imtcp")'
+  notify: restart rsyslog
+
+- name: Enable TCP syslog reception on port 514
+  lineinfile:
+    path: /etc/rsyslog.conf
+    regexp: '^#input\(type="imtcp" port="514"\)'
+    line: 'input(type="imtcp" port="514")'
+  notify: restart rsyslog
+
+- name: Create separate log files per host
+  copy:
+    dest: /etc/rsyslog.d/60-remote-logs.conf
+    content: |
+      # Log remote messages to per-host files
+      $template RemoteLogs,"/var/log/remote/%HOSTNAME%/%PROGRAMNAME%.log"
+      *.* ?RemoteLogs
+      & ~
+    mode: '0644'
+  notify: restart rsyslog
+
+- name: Install MySQL client for backups
+  apt:
+    name: mysql-client
+    state: present
+
+- name: Create backup directory
+  file:
+    path: /backups/mysql
+    state: directory
+    mode: '0755'
+
+- name: Create backup script
+  copy:
+    dest: /usr/local/bin/backup_db.sh
+    mode: '0755'
+    content: |
+      #!/bin/bash
+      DATE=$(date +%Y%m%d_%H%M%S)
+      mysqldump -h 192.168.50.11 -uwp_user -pwp_pass_123 wordpress | gzip > /backups/mysql/wp_$DATE.sql.gz
+      find /backups/mysql -mtime +7 -delete
+
+- name: Add cron job for backup
+  cron:
+    name: "Daily DB Backup"
+    minute: "0"
+    hour: "3"
+    job: "/usr/local/bin/backup_db.sh"

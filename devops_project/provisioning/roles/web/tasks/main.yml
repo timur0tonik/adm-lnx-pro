@@ -1,0 +1,174 @@
+---
+- name: Install Nginx and PHP
+  apt:
+    name: [nginx, php-fpm, php-mysql, php-curl, php-gd, php-mbstring, php-xml, php-zip]
+    state: present
+    update_cache: yes
+
+- name: Copy SSL Certificates (only on front)
+  copy:
+    src: "/opt/certs/{{ item }}"
+    dest: "/etc/ssl/{{ item }}"
+    mode: '0644'
+  loop: [fullchain.pem, privkey.pem]
+  when: inventory_hostname == 'front'
+  notify: restart nginx
+
+- name: Configure Nginx Load Balancer (only on front)
+  template:
+    src: templates/nginx-loadbalancer.conf.j2
+    dest: /etc/nginx/sites-available/default
+  notify: restart nginx
+  when: inventory_hostname == 'front'
+
+- name: Configure Nginx Backend (only on backends)
+  template:
+    src: templates/nginx-backend.conf.j2
+    dest: /etc/nginx/sites-available/default
+  notify: restart nginx
+  when: inventory_hostname in ['back1', 'back2']
+
+- name: Enable Nginx site
+  file:
+    src: /etc/nginx/sites-available/default
+    dest: /etc/nginx/sites-enabled/default
+    state: link
+  when: inventory_hostname in ['front', 'back1', 'back2']
+
+- name: Start services
+  service:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  loop: [nginx, php8.3-fpm]
+
+- name: Download and extract WordPress
+  unarchive:
+    src: https://wordpress.org/latest.tar.gz
+    dest: /var/www/html
+    remote_src: yes
+    owner: www-data
+    group: www-data
+    creates: /var/www/html/wp-config-sample.php
+
+- name: Move WordPress files to web root
+  shell: |
+    if [ -d /var/www/html/wordpress ]; then
+      cp -r /var/www/html/wordpress/* /var/www/html/
+      cp -r /var/www/html/wordpress/.* /var/www/html/ 2>/dev/null || true
+      rm -rf /var/www/html/wordpress
+    fi
+  args:
+    creates: /var/www/html/index.php
+
+- name: Configure WordPress config file
+  template:
+    src: templates/wp-config.php.j2
+    dest: /var/www/html/wp-config.php
+    owner: www-data
+    group: www-data
+    mode: '0644'
+
+- name: Install WP-CLI on all web servers
+  get_url:
+    url: https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+    dest: /usr/local/bin/wp
+    mode: '0755'
+
+- name: Create mu-plugins directory
+  file:
+    path: /var/www/html/wp-content/mu-plugins
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+
+- name: Deploy disable-canonical mu-plugin
+  copy:
+    dest: /var/www/html/wp-content/mu-plugins/disable-canonical.php
+    content: |
+      <?php
+      /**
+       * Отключает канонический редирект WordPress
+       * Решает проблему ERR_TOO_MANY_REDIRECTS при работе за прокси/балансировщиком
+       */
+      add_filter('redirect_canonical', '__return_false');
+    owner: www-data
+    group: www-data
+    mode: '0644'
+  when: inventory_hostname in ['back1', 'back2']
+
+# ===== Установка WordPress (только на back1, мастере БД) =====
+- name: Wait for wp-config.php to exist
+  stat:
+    path: /var/www/html/wp-config.php
+  register: wp_config
+  until: wp_config.stat.exists
+  retries: 10
+  delay: 2
+  when: inventory_hostname == 'back1'
+
+- name: Ensure wp-content directory permissions
+  file:
+    path: /var/www/html/wp-content
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+  when: inventory_hostname == 'back1'
+
+- name: Create languages directory
+  file:
+    path: /var/www/html/wp-content/languages
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+  when: inventory_hostname in ['back1', 'back2']
+
+- name: Wait for MySQL to be ready on back1
+  wait_for:
+    port: 3306
+    host: 192.168.50.11
+    timeout: 60
+  when: inventory_hostname == 'back1'
+
+- name: Install WordPress tables via WP-CLI
+  shell: |
+    sudo -u www-data wp core install \
+      --url="https://localhost:8443" \
+      --title="DevOps Project" \
+      --admin_user="admint" \
+      --admin_password="zuiUWoO@3O)8cW4" \
+      --admin_email="admin@example.com" \
+      --skip-email
+  args:
+    chdir: /var/www/html
+  when: inventory_hostname == 'back1'
+  register: wp_install
+  failed_when: wp_install.rc != 0 and 'already installed' not in wp_install.stdout
+
+- name: Install Russian language pack
+  shell: sudo -u www-data wp language core install ru_RU
+  args:
+    chdir: /var/www/html
+  when: inventory_hostname == 'back1'
+
+- name: Switch site language to Russian
+  shell: sudo -u www-data wp site switch-language ru_RU
+  args:
+    chdir: /var/www/html
+  when: inventory_hostname == 'back1'
+
+- name: Flush rewrite rules
+  shell: sudo -u www-data wp rewrite flush
+  args:
+    chdir: /var/www/html
+  when: inventory_hostname == 'back1'
+
+- name: Create flag file for replication
+  copy:
+    content: "installed"
+    dest: /tmp/wordpress_installed
+    mode: '0644'
+  when: inventory_hostname == 'back1'

@@ -1,0 +1,75 @@
+---
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Install basic packages
+  apt:
+    name: [curl, git, ufw, rsyslog, htop]
+    state: present
+
+- name: Configure UFW (Firewall) on front
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: ["22", "80", "443"]
+  when: inventory_hostname == "front"
+
+- name: Disable UFW on non-front hosts (to avoid SSH lock)
+  ufw:
+    state: disabled
+  when: inventory_hostname != "front"
+
+# ===== Zabbix Agent (для всех хостов) =====
+# Добавление репозитория Zabbix
+- name: Add Zabbix official repository for Ubuntu 24.04
+  apt:
+    deb: "https://repo.zabbix.com/zabbix/6.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.4-1+ubuntu24.04_all.deb"
+
+# Принудительное обновление кэша APT
+- name: Update apt cache after adding Zabbix repo
+  apt:
+    update_cache: yes
+
+# Установка Zabbix Agent
+- name: Install zabbix-agent
+  apt:
+    name: zabbix-agent
+    state: present
+
+- name: Configure zabbix-agent (set Server)
+  lineinfile:
+    path: /etc/zabbix/zabbix_agentd.conf
+    regexp: '^Server='
+    line: 'Server=192.168.50.20'
+  notify: restart zabbix-agent
+
+- name: Configure zabbix-agent (set ServerActive)
+  lineinfile:
+    path: /etc/zabbix/zabbix_agentd.conf
+    regexp: '^ServerActive='
+    line: 'ServerActive=192.168.50.20'
+  notify: restart zabbix-agent
+
+- name: Configure zabbix-agent (set Hostname)
+  lineinfile:
+    path: /etc/zabbix/zabbix_agentd.conf
+    regexp: '^Hostname='
+    line: 'Hostname={{ inventory_hostname }}'
+  notify: restart zabbix-agent
+
+- name: Start and enable zabbix-agent
+  service:
+    name: zabbix-agent
+    state: started
+    enabled: yes
+
+# ===== Отправка логов на центральный сервер (logger) =====
+- name: Configure rsyslog to send logs to logger
+  lineinfile:
+    path: /etc/rsyslog.conf
+    line: '*.* @@192.168.50.21:514'
+    insertafter: '^#### RULES ####'
+  notify: restart rsyslog

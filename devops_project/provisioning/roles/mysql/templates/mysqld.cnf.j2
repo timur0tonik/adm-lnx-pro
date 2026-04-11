@@ -1,0 +1,14 @@
+[mysqld]
+bind-address = 0.0.0.0
+server-id = {{ server_id | default(1) }}
+
+{% if db_role | default('master') == 'master' %}
+log_bin = /var/log/mysql/mysql-bin.log
+binlog_do_db = wordpress
+{% else %}
+relay-log = /var/log/mysql/mysql-relay-bin.log
+read_only = 1
+{% endif %}
+
+max_connections = 100
+innodb_buffer_pool_size = 128M

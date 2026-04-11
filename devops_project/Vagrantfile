@@ -1,0 +1,247 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+VAGRANTFILE_API_VERSION = "2"
+
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
+  config.vm.box = "ubuntu24-gold"
+  config.vm.synced_folder "./provisioning", "/vagrant/provisioning", create: true
+  config.vm.synced_folder "./certs", "/opt/certs", create: true
+  config.vm.boot_timeout = 600
+  config.ssh.insert_key = false
+  config.ssh.private_key_path = ["~/.vagrant.d/insecure_private_key"]
+  config.ssh.username = "vagrant"
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = "2048"
+    vb.cpus = "2"
+    vb.customize ["modifyvm", :id, "--ioapic", "on"]
+  end
+
+  # 1. Frontend
+  config.vm.define "front" do |node|
+    node.vm.hostname = "front.kiselman.pro"
+    node.vm.network "private_network", ip: "192.168.50.10"
+	node.vm.network "forwarded_port", guest: 80, host: 8080
+	node.vm.network "forwarded_port", guest: 443, host: 8443
+
+	node.vm.provision "shell", inline: <<-SHELL
+	# Ждём освобождения блокировки dpkg (unattended-upgrades)
+	for i in {1..30}; do
+		if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+			break
+		fi
+		echo "Waiting for dpkg lock... attempt $i"
+		sleep 5
+	done
+
+	# Убиваем unattended-upgrades если всё ещё держит lock
+	sudo killall -9 unattended-upgr 2>/dev/null || true
+	sudo rm -f /var/lib/dpkg/lock-frontend
+	sudo rm -f /var/lib/dpkg/lock
+	sudo rm -f /var/cache/apt/archives/lock
+
+	# Отключаем unattended-upgrades
+	sudo systemctl disable --now unattended-upgrades 2>/dev/null || true
+
+	# Создаём swap
+	if [ ! -f /swapfile ]; then
+		dd if=/dev/zero of=/swapfile bs=1M count=1024
+		chmod 600 /swapfile
+		mkswap /swapfile
+		swapon /swapfile
+		echo '/swapfile none swap sw 0 0' >> /etc/fstab
+	fi
+
+	# Обновляем и устанавливаем ansible
+	apt update && apt install -y ansible
+	SHELL
+
+    node.vm.provision "ansible_local" do |ansible|
+      ansible.playbook = "provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.compatibility_mode = "2.0"
+    end
+  end
+
+  # 2. Backend 1 (Master)
+  config.vm.define "back1" do |node|
+    node.vm.hostname = "back1.internal"
+    node.vm.network "private_network", ip: "192.168.50.11"
+
+	node.vm.provision "shell", inline: <<-SHELL
+	# Ждём освобождения блокировки dpkg (unattended-upgrades)
+	for i in {1..30}; do
+		if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+			break
+		fi
+		echo "Waiting for dpkg lock... attempt $i"
+		sleep 5
+	done
+
+	# Убиваем unattended-upgrades если всё ещё держит lock
+	sudo killall -9 unattended-upgr 2>/dev/null || true
+	sudo rm -f /var/lib/dpkg/lock-frontend
+	sudo rm -f /var/lib/dpkg/lock
+	sudo rm -f /var/cache/apt/archives/lock
+
+	# Отключаем unattended-upgrades
+	sudo systemctl disable --now unattended-upgrades 2>/dev/null || true
+
+	# Создаём swap
+	if [ ! -f /swapfile ]; then
+		dd if=/dev/zero of=/swapfile bs=1M count=1024
+		chmod 600 /swapfile
+		mkswap /swapfile
+		swapon /swapfile
+		echo '/swapfile none swap sw 0 0' >> /etc/fstab
+	fi
+
+	# Обновляем и устанавливаем ansible
+	apt update && apt install -y ansible
+	SHELL
+
+    node.vm.provision "ansible_local" do |ansible|
+      ansible.playbook = "provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.compatibility_mode = "2.0"
+    end
+  end
+
+  # 3. Backend 2 (Slave)
+  config.vm.define "back2" do |node|
+    node.vm.hostname = "back2.internal"
+    node.vm.network "private_network", ip: "192.168.50.12"
+
+	node.vm.provision "shell", inline: <<-SHELL
+	# Ждём освобождения блокировки dpkg (unattended-upgrades)
+	for i in {1..30}; do
+		if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+			break
+		fi
+		echo "Waiting for dpkg lock... attempt $i"
+		sleep 5
+	done
+
+	# Убиваем unattended-upgrades если всё ещё держит lock
+	sudo killall -9 unattended-upgr 2>/dev/null || true
+	sudo rm -f /var/lib/dpkg/lock-frontend
+	sudo rm -f /var/lib/dpkg/lock
+	sudo rm -f /var/cache/apt/archives/lock
+
+	# Отключаем unattended-upgrades
+	sudo systemctl disable --now unattended-upgrades 2>/dev/null || true
+
+	# Создаём swap
+	if [ ! -f /swapfile ]; then
+		dd if=/dev/zero of=/swapfile bs=1M count=1024
+		chmod 600 /swapfile
+		mkswap /swapfile
+		swapon /swapfile
+		echo '/swapfile none swap sw 0 0' >> /etc/fstab
+	fi
+
+	# Обновляем и устанавливаем ansible
+	apt update && apt install -y ansible
+	SHELL
+
+    node.vm.provision "ansible_local" do |ansible|
+      ansible.playbook = "provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.compatibility_mode = "2.0"
+    end
+  end
+
+  # 4. Monitoring
+  config.vm.define "monitor" do |node|
+    node.vm.hostname = "monitor.internal"
+    node.vm.network "private_network", ip: "192.168.50.20"
+
+	node.vm.provision "shell", inline: <<-SHELL
+	# Ждём освобождения блокировки dpkg (unattended-upgrades)
+	for i in {1..30}; do
+		if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+			break
+		fi
+		echo "Waiting for dpkg lock... attempt $i"
+		sleep 5
+	done
+
+	# Убиваем unattended-upgrades если всё ещё держит lock
+	sudo killall -9 unattended-upgr 2>/dev/null || true
+	sudo rm -f /var/lib/dpkg/lock-frontend
+	sudo rm -f /var/lib/dpkg/lock
+	sudo rm -f /var/cache/apt/archives/lock
+
+	# Отключаем unattended-upgrades
+	sudo systemctl disable --now unattended-upgrades 2>/dev/null || true
+
+	# Создаём swap
+	if [ ! -f /swapfile ]; then
+		dd if=/dev/zero of=/swapfile bs=1M count=1024
+		chmod 600 /swapfile
+		mkswap /swapfile
+		swapon /swapfile
+		echo '/swapfile none swap sw 0 0' >> /etc/fstab
+	fi
+
+	# Обновляем и устанавливаем ansible
+	apt update && apt install -y ansible
+	SHELL
+
+    node.vm.provision "ansible_local" do |ansible|
+      ansible.playbook = "provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.compatibility_mode = "2.0"
+    end
+  end
+
+  # 5. Logging
+  config.vm.define "logger" do |node|
+    node.vm.hostname = "logger.internal"
+    node.vm.network "private_network", ip: "192.168.50.21"
+
+	node.vm.provision "shell", inline: <<-SHELL
+	# Ждём освобождения блокировки dpkg (unattended-upgrades)
+	for i in {1..30}; do
+		if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+			break
+		fi
+		echo "Waiting for dpkg lock... attempt $i"
+		sleep 5
+	done
+
+	# Убиваем unattended-upgrades если всё ещё держит lock
+	sudo killall -9 unattended-upgr 2>/dev/null || true
+	sudo rm -f /var/lib/dpkg/lock-frontend
+	sudo rm -f /var/lib/dpkg/lock
+	sudo rm -f /var/cache/apt/archives/lock
+
+	# Отключаем unattended-upgrades
+	sudo systemctl disable --now unattended-upgrades 2>/dev/null || true
+
+	# Создаём swap
+	if [ ! -f /swapfile ]; then
+		dd if=/dev/zero of=/swapfile bs=1M count=1024
+		chmod 600 /swapfile
+		mkswap /swapfile
+		swapon /swapfile
+		echo '/swapfile none swap sw 0 0' >> /etc/fstab
+	fi
+
+	# Обновляем и устанавливаем ansible
+	apt update && apt install -y ansible
+	SHELL
+
+    node.vm.provision "ansible_local" do |ansible|
+      ansible.playbook = "provisioning/playbook.yml"
+      ansible.become = true
+      ansible.install = false
+      ansible.compatibility_mode = "2.0"
+    end
+  end
+end

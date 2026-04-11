@@ -1,0 +1,326 @@
+---
+- name: Base setup for all hosts
+  hosts: all
+  become: yes
+  roles:
+    - common
+
+- name: Database on backends with replication
+  hosts: back1,back2
+  become: yes
+  roles:
+    - mysql
+
+- name: Web stack on front
+  hosts: front
+  become: yes
+  roles:
+    - web
+
+- name: Web stack on backends
+  hosts: back1,back2
+  become: yes
+  roles:
+    - web
+
+- name: Monitoring with Zabbix
+  hosts: monitor
+  become: yes
+  roles:
+    - monitor
+
+- name: Logging & backups
+  hosts: logger
+  become: yes
+  roles:
+    - logger
+
+# ===== НАСТРОЙКА РЕПЛИКАЦИИ ПОСЛЕ УСТАНОВКИ WORDPRESS =====
+- name: Add master host key to known_hosts on slave (using ssh-keyscan)
+  hosts: back2
+  tasks:
+    - name: Ensure .ssh directory exists
+      file:
+        path: /home/vagrant/.ssh
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0700'
+
+    - name: Add back1 to known_hosts on back2
+      shell: |
+        ssh-keyscan -H 192.168.50.11 >> /home/vagrant/.ssh/known_hosts 2>/dev/null
+      args:
+        creates: /home/vagrant/.ssh/known_hosts
+      become_user: vagrant
+      changed_when: false
+
+- name: Setup passwordless SSH from back2 to back1
+  hosts: back2
+  tasks:
+    - name: Install sshpass for password authentication
+      apt:
+        name: sshpass
+        state: present
+      become: yes
+
+    - name: Generate SSH key for vagrant user on back2 (if missing)
+      user:
+        name: vagrant
+        generate_ssh_key: yes
+        ssh_key_bits: 2048
+        ssh_key_file: .ssh/id_rsa
+
+    - name: Read public key from back2
+      slurp:
+        src: /home/vagrant/.ssh/id_rsa.pub
+      register: back2_pubkey
+
+    - name: Add back2's public key to back1's authorized_keys
+      authorized_key:
+        user: vagrant
+        state: present
+        key: "{{ back2_pubkey['content'] | b64decode }}"
+      delegate_to: 192.168.50.11
+      vars:
+        ansible_user: vagrant
+        ansible_password: vagrant
+        ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+- name: Configure replication after WordPress installation
+  hosts: back2
+  become: yes
+  tasks:
+    - name: Wait for WordPress installation to complete on master (flag file)
+      wait_for:
+        path: /tmp/wordpress_installed
+        timeout: 300
+      delegate_to: 192.168.50.11
+      vars:
+        ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+    - name: Create database dump on master
+      shell: mysqldump --single-transaction wordpress > /tmp/wordpress.sql
+      delegate_to: 192.168.50.11
+      vars:
+        ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+    - name: Fetch dump to control node (back2)
+      fetch:
+        src: /tmp/wordpress.sql
+        dest: /tmp/wordpress.sql
+        flat: yes
+      delegate_to: 192.168.50.11
+      vars:
+        ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+    - name: Import dump on slave
+      shell: |
+        mysql -e "CREATE DATABASE IF NOT EXISTS wordpress;"
+        mysql wordpress < /tmp/wordpress.sql
+      become: yes
+
+    - name: Remove dump file from master
+      file:
+        path: /tmp/wordpress.sql
+        state: absent
+      delegate_to: 192.168.50.11
+
+    - name: Remove dump file from slave
+      file:
+        path: /tmp/wordpress.sql
+        state: absent
+
+    - name: Ensure replication user exists on master
+      mysql_user:
+        name: repl_user
+        password: repl_pass_123
+        priv: "*.*:REPLICATION SLAVE"
+        host: "%"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      delegate_to: 192.168.50.11
+      vars:
+        ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+    - name: Get master binary log coordinates
+      mysql_replication:
+        mode: getprimary
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      register: master_status
+      delegate_to: 192.168.50.11
+
+    - name: Stop replica if running
+      mysql_replication:
+        mode: stopreplica
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      ignore_errors: yes
+
+    - name: Reset replica (optional)
+      mysql_replication:
+        mode: resetreplica
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      ignore_errors: yes
+
+    - name: Configure slave to use master
+      mysql_replication:
+        mode: changeprimary
+        primary_host: 192.168.50.11
+        primary_user: repl_user
+        primary_password: repl_pass_123
+        primary_log_file: "{{ master_status.File }}"
+        primary_log_pos: "{{ master_status.Position }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Start replica
+      mysql_replication:
+        mode: startreplica
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+# ===== АВТОМАТИЧЕСКОЕ ВОССТАНОВЛЕНИЕ BACK1 ИЗ BACK2 =====
+- name: Check if back1 needs data restore and restore if needed
+  hosts: back1
+  become: yes
+  tasks:
+    - name: Install sshpass for password authentication to back2
+      apt:
+        name: sshpass
+        state: present
+
+    - name: Get publish post count on back1
+      shell: |
+        mysql -e "USE wordpress; SELECT COUNT(*) FROM wp_posts WHERE post_status='publish' AND post_type='post';" 2>/dev/null | tail -n1
+      register: back1_post_count
+      ignore_errors: yes
+
+    - name: Get publish post count on back2
+      shell: |
+        mysql -e "USE wordpress; SELECT COUNT(*) FROM wp_posts WHERE post_status='publish' AND post_type='post';" 2>/dev/null | tail -n1
+      delegate_to: 192.168.50.12
+      vars:
+        ansible_user: vagrant
+        ansible_password: vagrant
+        ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+      register: back2_post_count
+      ignore_errors: yes
+
+    - name: Set fact for restore needed
+      set_fact:
+        need_restore: >-
+          {{
+            (back1_post_count.stdout | default('0') | int == 0) or
+            (back2_post_count.stdout | default('0') | int > back1_post_count.stdout | default('0') | int)
+          }}
+
+    - block:
+        - name: Create database dump on back2
+          shell: mysqldump --single-transaction wordpress > /tmp/wordpress_restore.sql
+          delegate_to: 192.168.50.12
+          vars:
+            ansible_user: vagrant
+            ansible_password: vagrant
+            ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+        - name: Fetch dump from back2 to control node (back1)
+          fetch:
+            src: /tmp/wordpress_restore.sql
+            dest: /tmp/wordpress_restore.sql
+            flat: yes
+          delegate_to: 192.168.50.12
+          vars:
+            ansible_user: vagrant
+            ansible_password: vagrant
+            ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+        - name: Copy dump from control node to back1
+          copy:
+            src: /tmp/wordpress_restore.sql
+            dest: /tmp/wordpress_restore.sql
+            owner: vagrant
+            group: vagrant
+            mode: '0644'
+
+        - name: Drop existing wordpress database on back1
+          shell: mysql -e "DROP DATABASE IF EXISTS wordpress; CREATE DATABASE wordpress;"
+
+        - name: Import dump into MySQL on back1
+          shell: mysql wordpress < /tmp/wordpress_restore.sql
+
+        - name: Ensure replication user exists on back1 (master)
+          mysql_user:
+            name: repl_user
+            password: repl_pass_123
+            priv: "*.*:REPLICATION SLAVE"
+            host: "%"
+            state: present
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+
+        - name: Get master binary log coordinates
+          mysql_replication:
+            mode: getprimary
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+          register: master_status
+
+        - name: Stop and reset replica on back2
+          mysql_replication:
+            mode: stopreplica
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+          delegate_to: 192.168.50.12
+          vars:
+            ansible_user: vagrant
+            ansible_password: vagrant
+            ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+          ignore_errors: yes
+
+        - name: Reset replica on back2
+          mysql_replication:
+            mode: resetreplica
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+          delegate_to: 192.168.50.12
+          vars:
+            ansible_user: vagrant
+            ansible_password: vagrant
+            ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+          ignore_errors: yes
+
+        - name: Configure back2 as slave of new master
+          mysql_replication:
+            mode: changeprimary
+            primary_host: 192.168.50.11
+            primary_user: repl_user
+            primary_password: repl_pass_123
+            primary_log_file: "{{ master_status.File }}"
+            primary_log_pos: "{{ master_status.Position }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+          delegate_to: 192.168.50.12
+          vars:
+            ansible_user: vagrant
+            ansible_password: vagrant
+            ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+        - name: Start replica on back2
+          mysql_replication:
+            mode: startreplica
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+          delegate_to: 192.168.50.12
+          vars:
+            ansible_user: vagrant
+            ansible_password: vagrant
+            ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+        - name: Clean up dump files on back1
+          file:
+            path: /tmp/wordpress_restore.sql
+            state: absent
+
+        - name: Remove dump from back2
+          file:
+            path: /tmp/wordpress_restore.sql
+            state: absent
+          delegate_to: 192.168.50.12
+          vars:
+            ansible_user: vagrant
+            ansible_password: vagrant
+            ansible_ssh_extra_args: '-o StrictHostKeyChecking=no'
+
+      when: need_restore | bool

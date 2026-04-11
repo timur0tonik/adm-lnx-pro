@@ -1,0 +1,27 @@
+<IfModule mod_ssl.c>
+    <VirtualHost *:443>
+        ServerName monitor.internal
+        DocumentRoot /usr/share/zabbix
+
+        <Directory /usr/share/zabbix>
+            Options FollowSymLinks
+            AllowOverride None
+            Require all granted
+        </Directory>
+
+        <Directory /usr/share/zabbix/conf>
+            Require all denied
+        </Directory>
+
+        <Directory /usr/share/zabbix/include>
+            Require all denied
+        </Directory>
+
+        ErrorLog ${APACHE_LOG_DIR}/zabbix_ssl_error.log
+        CustomLog ${APACHE_LOG_DIR}/zabbix_ssl_access.log combined
+
+        SSLEngine on
+        SSLCertificateFile /etc/ssl/zabbix/fullchain.pem
+        SSLCertificateKeyFile /etc/ssl/zabbix/privkey.pem
+    </VirtualHost>
+</IfModule>

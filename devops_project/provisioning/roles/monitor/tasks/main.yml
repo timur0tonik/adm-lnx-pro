@@ -1,0 +1,223 @@
+---
+- name: Install MySQL Server for Zabbix
+  apt:
+    name: mysql-server
+    state: present
+    update_cache: yes
+
+- name: Start MySQL service
+  service:
+    name: mysql
+    state: started
+    enabled: yes
+
+- name: Wait for MySQL to be ready
+  wait_for:
+    path: /var/run/mysqld/mysqld.sock
+    timeout: 30
+
+- name: Create .my.cnf for root MySQL access
+  copy:
+    dest: /root/.my.cnf
+    content: |
+      [client]
+      user=root
+      password=
+      socket=/var/run/mysqld/mysqld.sock
+    mode: '0600'
+
+- name: Configure root auth for mysql_native_password
+  shell: |
+    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '';" 2>/dev/null || true
+    mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+  ignore_errors: yes
+
+- name: Add Zabbix repository with retry
+  block:
+    - name: Add Zabbix official repository for Ubuntu 24.04
+      apt:
+        deb: "https://repo.zabbix.com/zabbix/6.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.4-1+ubuntu24.04_all.deb"
+        update_cache: yes
+  rescue:
+    - name: Wait 10 seconds and retry
+      wait_for:
+        timeout: 10
+      delegate_to: localhost
+    - name: Retry adding Zabbix repository
+      apt:
+        deb: "https://repo.zabbix.com/zabbix/6.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.4-1+ubuntu24.04_all.deb"
+        update_cache: yes
+
+- name: Add Zabbix official repository for Ubuntu 24.04
+  apt:
+    deb: "https://repo.zabbix.com/zabbix/6.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.4-1+ubuntu24.04_all.deb"
+    update_cache: yes
+
+- name: Install Zabbix packages
+  apt:
+    name:
+      - zabbix-server-mysql
+      - zabbix-frontend-php
+      - zabbix-apache-conf
+      - zabbix-sql-scripts
+      - zabbix-agent
+    state: present
+    update_cache: yes
+
+- name: Create Zabbix database via shell
+  shell: |
+    mysql -e "CREATE DATABASE IF NOT EXISTS zabbix CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
+    mysql -e "CREATE USER IF NOT EXISTS 'zabbix'@'localhost' IDENTIFIED WITH mysql_native_password BY 'zabbix_pass_123';"
+    mysql -e "GRANT ALL PRIVILEGES ON zabbix.* TO 'zabbix'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
+
+- name: Import Zabbix schema via shell
+  shell: |
+    zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql zabbix
+  args:
+    creates: /var/lib/zabbix/db.schema.imported
+
+- name: Ensure Zabbix data directory exists
+  file:
+    path: /var/lib/zabbix
+    state: directory
+    owner: zabbix
+    group: zabbix
+    mode: '0755'
+
+- name: Mark schema as imported
+  file:
+    path: /var/lib/zabbix/db.schema.imported
+    state: touch
+    owner: zabbix
+    group: zabbix
+
+- name: Configure Zabbix DB connection
+  lineinfile:
+    path: /etc/zabbix/zabbix_server.conf
+    regexp: '^#?DBPassword='
+    line: 'DBPassword=zabbix_pass_123'
+  notify: restart zabbix-server
+
+- name: Start and enable Zabbix services
+  service:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  loop:
+    - mysql
+    - zabbix-server
+    - zabbix-agent
+    - apache2
+
+- name: Install Russian locale
+  apt:
+    name: language-pack-ru
+    state: present
+
+- name: Generate ru_RU.UTF-8 locale
+  command: locale-gen ru_RU.UTF-8
+  args:
+    creates: /usr/lib/locale/ru_RU.UTF-8
+
+- name: Set system locale to Russian (optional)
+  command: update-locale LANG=ru_RU.UTF-8
+  ignore_errors: yes
+
+- name: Configure Zabbix web interface language to Russian
+  lineinfile:
+    path: /etc/zabbix/web/zabbix.conf.php
+    regexp: '^\$LANG ='
+    line: '$LANG = ''ru_RU'';'
+    create: yes
+  notify: restart apache2
+
+- name: Create Zabbix web configuration file
+  copy:
+    dest: /usr/share/zabbix/conf/zabbix.conf.php
+    content: |
+      <?php
+      global $DB;
+      $DB['TYPE']     = 'MYSQL';
+      $DB['SERVER']   = 'localhost';
+      $DB['PORT']     = '0';
+      $DB['DATABASE'] = 'zabbix';
+      $DB['USER']     = 'zabbix';
+      $DB['PASSWORD'] = 'zabbix_pass_123';
+      $DB['SCHEMA']   = '';
+      $ZBX_SERVER_NAME = 'DevOps Project';
+      $IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
+    owner: www-data
+    group: www-data
+    mode: '0640'
+  notify: restart apache2
+
+# ===== Настройка HTTPS для Zabbix =====
+- name: Enable Apache SSL module
+  command: a2enmod ssl
+  notify: restart apache2
+
+- name: Create directory for SSL certificates
+  file:
+    path: /etc/ssl/zabbix
+    state: directory
+    mode: '0755'
+
+- name: Copy SSL certificates from host to monitor
+  copy:
+    src: "/opt/certs/{{ item }}"
+    dest: "/etc/ssl/zabbix/{{ item }}"
+    mode: '0644'
+  loop:
+    - fullchain.pem
+    - privkey.pem
+  notify: restart apache2
+
+- name: Create directory for SSL config
+  file:
+    path: /etc/ssl/zabbix
+    state: directory
+    mode: '0755'
+
+- name: Configure Zabbix SSL virtual host
+  template:
+    src: zabbix-ssl.conf.j2
+    dest: /etc/apache2/sites-available/zabbix-ssl.conf
+  notify: restart apache2
+
+- name: Enable Zabbix SSL site
+  command: a2ensite zabbix-ssl.conf
+  notify: restart apache2
+
+- name: Configure Telegram alerts for Zabbix
+  block:
+    - name: Create alert scripts directory
+      file:
+        path: /etc/zabbix/alertscripts
+        state: directory
+        owner: zabbix
+        group: zabbix
+        mode: '0755'
+
+    - name: Deploy Telegram alert script
+      copy:
+        dest: /etc/zabbix/alertscripts/telegram.sh
+        mode: '0755'
+        owner: zabbix
+        group: zabbix
+        content: |
+          #!/bin/bash
+          BOT_TOKEN=""
+          CHAT_ID="$1"
+          MESSAGE="$3"
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=HTML"
+
+    - name: Update Zabbix config for alert scripts
+      lineinfile:
+        path: /etc/zabbix/zabbix_server.conf
+        regexp: '^#?AlertScriptsPath='
+        line: 'AlertScriptsPath=/etc/zabbix/alertscripts'
+      notify: restart zabbix-server
